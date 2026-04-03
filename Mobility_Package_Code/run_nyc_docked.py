@@ -13,30 +13,30 @@ ctx = docked_wrapper.load_docked_context(
 # ------------------------------------------------------------------
 # OPTION A — all metrics at once
 # ------------------------------------------------------------------
-results = docked_wrapper.compute_all(
-    ctx,
-    trip_csv=r"D:\Research Fellowship\NYC Trend Visual Docs\202504-citibike-tripdata",
-    time_start="2025-04-06 00:00:00",
-    time_end="2025-04-06 23:59:59",
-)
+# results = docked_wrapper.compute_all(
+#     ctx,
+#     trip_csv=r"D:\Research Fellowship\NYC Trend Visual Docs\202504-citibike-tripdata",
+#     time_start="2025-04-06 00:00:00",
+#     time_end="2025-04-06 23:59:59",
+# )
 
 # ------------------------------------------------------------------
 # OPTION B — single metrics, pick whichever one(s) you need
 # ------------------------------------------------------------------
 
 # # availability only
-# avail = docked_wrapper.compute_availability(
-#     ctx,
-#     time_start="2025-04-06 00:00:00",
-#     time_end="2025-04-06 23:59:59",
-# )
+avail = docked_wrapper.compute_availability(
+    ctx,
+    time_start="2025-04-06 00:00:00",
+    time_end="2025-04-06 23:59:59",
+)
 
-# # capacity only
-# cap = docked_wrapper.compute_capacity(
-#     ctx,
-#     time_start="2025-04-06 00:00:00",
-#     time_end="2025-04-06 23:59:59",
-# )
+# capacity only
+cap = docked_wrapper.compute_capacity(
+    ctx,
+    time_start="2025-04-06 00:00:00",
+    time_end="2025-04-06 23:59:59",
+)
 
 # # safety only
 # safe = docked_wrapper.compute_safety(
