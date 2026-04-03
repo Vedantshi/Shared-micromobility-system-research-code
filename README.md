@@ -1,4 +1,4 @@
-# mobility-package
+# Mobility Package
 
 ### A Python Package for Multidimensional Fairness Analysis of Shared Micromobility Systems
 
@@ -36,41 +36,56 @@ dimensions using established inequality metrics (Gini coefficient) and
 combined fairness-efficiency metrics (Alpha fairness at α = 1).
 
 ---
-
 ## Pipeline Architecture
 
 The following diagram illustrates the full data-to-visualization pipeline
 implemented in this package.
 ```
-```
 Raw GBFS Snapshot (.txt)
          |
          v
-+----------------------------+
-|  docked_wrapper            |  for docked systems (NYC, NJ, Pittsburgh)
-|  dockless_wrapper          |  for dockless systems (SF Lime/Spin, Seattle Bird/Lime)
-+----------------------------+
++------------------------------------------+
+|  docked_wrapper                          |
+|  for docked systems                      |
+|  (NYC, NJ, Pittsburgh)                   |
+|                                          |
+|  dockless_wrapper                        |
+|  for dockless systems                    |
+|  (SF Lime/Spin, Seattle Bird/Lime)       |
++------------------------------------------+
          |
          |  Produces per-tract CSVs:
-         |  availability, capacity, usage, idle_time, safety
+         |  availability, capacity,
+         |  usage, idle_time, safety
          v
-+----------------------------+
-|  fairness_calculation      |  Gini coefficient + Alpha fairness
-+----------------------------+
++------------------------------------------+
+|  fairness_calculation                    |
+|  Gini coefficient + Alpha fairness       |
++------------------------------------------+
          |
          v
-+-----------------------------------------------------------+
-|                    Visualization Modules                  |
-|                                                           |
-|  map_visual           Utility choropleth maps             |
-|  capacity_map_visual  Capacity decile maps                |
-|  correlation_visual   4-quadrant metric correlation maps  |
-|  scatter_visual       Supply-demand scatter plots         |
-|  trend_visual         Weekly fairness time-series plots   |
-|  table_visual         Paper-style fairness summary table  |
-+-----------------------------------------------------------+
++------------------------------------------+
+|  Visualization Modules                   |
+|                                          |
+|  map_visual                              |
+|    Utility choropleth maps               |
+|                                          |
+|  capacity_map_visual                     |
+|    Capacity decile maps                  |
+|                                          |
+|  correlation_visual                      |
+|    4-quadrant metric correlation maps    |
+|                                          |
+|  scatter_visual                          |
+|    Supply-demand scatter plots           |
+|                                          |
+|  trend_visual                            |
+|    Weekly fairness time-series plots     |
+|                                          |
+|  table_visual                            |
+|    Paper-style fairness summary table    |
++------------------------------------------+
 ```
-
 ---
 
 ## Supported Systems
@@ -88,7 +103,7 @@ Raw GBFS Snapshot (.txt)
 ---
 
 ## Package Structure
-```
+
 ```
 mobility_package/
 │
