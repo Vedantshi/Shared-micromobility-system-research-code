@@ -1,64 +1,66 @@
 """
 =============================================================================
-DOCKLESS BIKE SHARE UTILITY ANALYTICS PIPELINE (PRODUCTION v2)
+DOCKLESS WRAPPER
 =============================================================================
 
 OVERVIEW
 --------
-This module provides modular functions to compute dockless bike share utility
-metrics. Each metric has its own function that can be called independently.
+This module computes all four utility metrics for dockless bike-share
+systems (Lime SF, Spin SF, Bird Seattle, Lime Seattle) from raw GBFS
+free-bike-status snapshot data.
 
-AVAILABLE METRICS & THEIR FUNCTIONS
-------------------------------------
-    compute_availability()  - available vehicles per census block and tract
-    compute_usage()         - vehicle starts and ends per block and tract
-    compute_idle_time()     - average idle time per block and tract
-    compute_safety()        - bike lane and protected lane ratios per tract
+USAGE PATTERN
+-------------
+Every script follows the same two-step pattern:
+
+    Step 1 — load context (always first)
+    Step 2 — call individual metric functions or compute_all at once
+
+    from mobility_package import dockless_wrapper
+
+    ctx = dockless_wrapper.load_dockless_context(
+        system_key         = "SF_LIME_DOCKLESS",
+        freebike_status_txt= r"path/to/sf_lime_freebike_status.txt",
+        output_dir         = "SF_LIME_FULL_RUN",
+        time_start         = "2025-06-09 06:00:00",
+        time_end           = "2025-06-09 12:00:00",
+    )
+
+    # Option A — all metrics at once
+    results = dockless_wrapper.compute_all(ctx)
+
+    # Option B — individual metrics
+    avail  = dockless_wrapper.compute_availability(ctx)
+    cap    = dockless_wrapper.compute_capacity(ctx)
+    usage  = dockless_wrapper.compute_usage(ctx)
+    idle   = dockless_wrapper.compute_idle_time(ctx)
+    safety = dockless_wrapper.compute_safety(ctx)
 
 SUPPORTED SYSTEMS
 -----------------
-    "SF_LIME_DOCKLESS"      - San Francisco, Lime
-    "SF_SPIN_DOCKLESS"      - San Francisco, Spin
-    "SEATTLE_BIRD_DOCKLESS" - Seattle, Bird
-    "SEATTLE_LIME_DOCKLESS" - Seattle, Lime
+    "SF_LIME_DOCKLESS"      San Francisco — Lime
+    "SF_SPIN_DOCKLESS"      San Francisco — Spin
+    "SEATTLE_BIRD_DOCKLESS" Seattle       — Bird
+    "SEATTLE_LIME_DOCKLESS" Seattle       — Lime
 
-HOW TO USE
-----------
-    Step 1 — load the shared context (always required first)
-    Step 2 — call whichever metric(s) you want
-
-    Dependencies between metrics are handled internally.
-    The user never needs to pass results between functions.
-
-EXAMPLE — single metric
------------------------
-    ctx   = load_dockless_context(system_key="SF_LIME_DOCKLESS", ...)
-    avail = compute_availability(ctx)
-
-EXAMPLE — metrics that need no extra inputs
---------------------------------------------
-    ctx   = load_dockless_context(system_key="SF_LIME_DOCKLESS", ...)
-    usage = compute_usage(ctx)
-    idle  = compute_idle_time(ctx)
-    safe  = compute_safety(ctx)
-
-EXAMPLE — all metrics at once
-------------------------------
-    ctx     = load_dockless_context(system_key="SF_LIME_DOCKLESS", ...)
-    results = compute_all(ctx)
-
-NOTE
-----
-    Unlike the docked system, dockless vehicles carry their own location
-    so there is no separate trip CSV. All metrics derive from the
-    freebike_status_txt snapshot file loaded in load_dockless_context().
+METRICS
+-------
+    compute_availability — non-reserved, non-disabled vehicles per tract
+    compute_capacity     — peak-hour vehicle count per tract (same logic
+                           as docked capacity: find the time slot with the
+                           highest system-wide availability and use that
+                           snapshot as the capacity baseline)
+    compute_usage        — infers trip starts/ends from consecutive
+                           location snapshots (no separate trip CSV needed)
+    compute_idle_time    — ping count × 5 minutes per vehicle per tract
+    compute_safety       — bike-lane ratio per tract
+    compute_all          — runs all five metrics in one call
 =============================================================================
 """
 
 from __future__ import annotations
 
 import json
-import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -70,56 +72,54 @@ from shapely import wkt
 from shapely.geometry import Point
 from tqdm import tqdm
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
 
+# ===========================================================================
+# SYSTEM CONFIGURATION TABLE
+# All city-specific asset paths and processing parameters live here.
+# Individual compute functions read from ctx["_preset"] so they never
+# need to know which city they are running against.
+# ===========================================================================
 
-# ---------------------------------------------------------------------------
-# System configuration
-# ---------------------------------------------------------------------------
-
-SYSTEM_CONFIG: Dict[str, Dict[str, Any]] = {
+_SYSTEMS: Dict[str, Dict[str, Any]] = {
     "SF_LIME_DOCKLESS": {
-        "city":                "San Francisco",
-        "vendor":              "Lime",
-        "tag":                 "sf_lime",
-        "default_output_dir":  "SF_LIME_DOCKLESS_FULL_RUN",
-        "raw_csv":             "san_fran_lime_status_raw.csv",
-        "done_csv":            "san_fran_lime_status_done.csv",
+        "city": "San Francisco",
+        "vendor": "Lime",
+        "tag": "sf_lime",
+        "default_output_dir": "SF_LIME_DOCKLESS_FULL_RUN",
+        "raw_csv":  "san_fran_lime_status_raw.csv",
+        "done_csv": "san_fran_lime_status_done.csv",
         "assets": {
-            "census_blocks_shp":       r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
-            "centerline_streets_path": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
-            "bike_lanes_path":         r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
-            "centroid_tract_path":     r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
+            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
+            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
+            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
+            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
         },
-        "safety_epsg":   26910,
+        "safety_epsg": 26910,
         "idle_decimals": 4,
     },
-
     "SF_SPIN_DOCKLESS": {
-        "city":                "San Francisco",
-        "vendor":              "Spin",
-        "tag":                 "sf_spin",
-        "default_output_dir":  "SF_SPIN_DOCKLESS_FULL_RUN",
-        "raw_csv":             "san_fran_spin_status_raw.csv",
-        "done_csv":            "san_fran_spin_status_done.csv",
+        "city": "San Francisco",
+        "vendor": "Spin",
+        "tag": "sf_spin",
+        "default_output_dir": "SF_SPIN_DOCKLESS_FULL_RUN",
+        "raw_csv":  "san_fran_spin_status_raw.csv",
+        "done_csv": "san_fran_spin_status_done.csv",
         "assets": {
-            "census_blocks_shp":       r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
-            "centerline_streets_path": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
-            "bike_lanes_path":         r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
-            "centroid_tract_path":     r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
+            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
+            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
+            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
+            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
         },
-        "safety_epsg":   26910,
+        "safety_epsg": 26910,
         "idle_decimals": 4,
     },
-
     "SEATTLE_BIRD_DOCKLESS": {
-        "city":                "Seattle",
-        "vendor":              "Bird",
-        "tag":                 "seattle_bird",
-        "default_output_dir":  "SEATTLE_BIRD_DOCKLESS_FULL_RUN",
-        "raw_csv":             "seattle_bird_status_raw.csv",
-        "done_csv":            "seattle_bird_status_done.csv",
+        "city": "Seattle",
+        "vendor": "Bird",
+        "tag": "seattle_bird",
+        "default_output_dir": "SEATTLE_BIRD_DOCKLESS_FULL_RUN",
+        "raw_csv":  "seattle_bird_status_raw.csv",
+        "done_csv": "seattle_bird_status_done.csv",
         "assets": {
             "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle Census Block\tl_2024_53_tabblock20.shp",
             "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle_Streets.shp",
@@ -127,22 +127,21 @@ SYSTEM_CONFIG: Dict[str, Dict[str, Any]] = {
             "planned_bike_lanes_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Planned Seattle Bike Lanes\Planned_Bike_Facilities.shp",
             "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Avalibility\Seattle_Bird\tl_2024_53_tract.shp",
         },
-        "safety_epsg":   2285,
+        "safety_epsg": 2285,
         "safety_config": {
-            "bike_lane_class_col":    "CATEGORY",
-            "protected_values":       ["BKF-PBL"],
-            "protected_match_mode":   "exact",
+            "bike_lane_class_col":   "CATEGORY",
+            "protected_values":      ["BKF-PBL"],
+            "protected_match_mode":  "exact",
         },
         "idle_decimals": 3,
     },
-
     "SEATTLE_LIME_DOCKLESS": {
-        "city":                "Seattle",
-        "vendor":              "Lime",
-        "tag":                 "seattle_lime",
-        "default_output_dir":  "SEATTLE_LIME_DOCKLESS_FULL_RUN",
-        "raw_csv":             "seattle_lime_status_raw.csv",
-        "done_csv":            "seattle_lime_status_done.csv",
+        "city": "Seattle",
+        "vendor": "Lime",
+        "tag": "seattle_lime",
+        "default_output_dir": "SEATTLE_LIME_DOCKLESS_FULL_RUN",
+        "raw_csv":  "seattle_lime_status_raw.csv",
+        "done_csv": "seattle_lime_status_done.csv",
         "assets": {
             "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle Census Block\tl_2024_53_tabblock20.shp",
             "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle_Streets.shp",
@@ -150,11 +149,11 @@ SYSTEM_CONFIG: Dict[str, Dict[str, Any]] = {
             "planned_bike_lanes_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Planned Seattle Bike Lanes\Planned_Bike_Facilities.shp",
             "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Avalibility\Seattle_Bird\tl_2024_53_tract.shp",
         },
-        "safety_epsg":   2285,
+        "safety_epsg": 2285,
         "safety_config": {
-            "bike_lane_class_col":    "CATEGORY",
-            "protected_values":       ["BKF-PBL"],
-            "protected_match_mode":   "exact",
+            "bike_lane_class_col":   "CATEGORY",
+            "protected_values":      ["BKF-PBL"],
+            "protected_match_mode":  "exact",
         },
         "idle_decimals": 4,
     },
@@ -162,363 +161,43 @@ SYSTEM_CONFIG: Dict[str, Dict[str, Any]] = {
 
 
 # ===========================================================================
-# INTERNAL HELPER CLASS
-# Not meant to be called directly by the user.
+# INTERNAL HELPERS
 # ===========================================================================
 
-class MetricHelper:
-    """Core calculation routines shared across all compute functions."""
+def _minmax(series: pd.Series) -> pd.Series:
+    """
+    Min-max normalise a numeric Series to [0, 1].
+    Returns all-zero if the range is zero or the series is empty/all-NaN.
+    """
+    s = pd.to_numeric(series, errors="coerce")
+    mn, mx = s.min(skipna=True), s.max(skipna=True)
+    if pd.isna(mn) or pd.isna(mx) or mx <= mn:
+        return pd.Series(0.0, index=s.index)
+    return (s - mn) / (mx - mn)
 
-    @staticmethod
-    def minmax_normalize(series: pd.Series) -> pd.Series:
-        """Min-max normalize a numeric series to the range [0, 1]."""
-        s      = pd.to_numeric(series, errors="coerce")
-        mn, mx = s.min(skipna=True), s.max(skipna=True)
-        if pd.isna(mn) or pd.isna(mx) or mx <= mn:
-            return pd.Series(0.0, index=s.index)
-        return (s - mn) / (mx - mn)
 
-    @staticmethod
-    def calc_availability(
-        done_df: pd.DataFrame,
-        block_granularity: str,
-        tract_granularity: str,
-        output_tag: str,
-        out_dir: Path,
-        save: bool,
-        normalize: bool,
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Count available (non-reserved, non-disabled) vehicles per block and tract.
+def _get_centroid_id_col(ct: pd.DataFrame) -> Optional[str]:
+    """
+    Return the first recognised census-tract / GEOID column name found in
+    the centroid DataFrame, or None if none are present.
+    """
+    candidates = ["GEOID", "GEOID20", "TRACTCE", "census_tract"]
+    return next((c for c in candidates if c in ct.columns), None)
 
-        Parameters
-        ----------
-        done_df            : geocoded vehicle status dataframe
-        block_granularity  : time bucket for block-level output e.g. "5min"
-        tract_granularity  : time bucket for tract-level output e.g. "1h"
-        output_tag         : system tag used in output filenames
-        out_dir            : output directory path
-        save               : whether to write CSV files
-        normalize          : whether to add a normalized column to tract output
-        """
-        df = done_df.copy()
-        df["slot"] = df["timestamp"].dt.floor(block_granularity)
 
-        # default reserved/disabled to 0 if not present in data
-        if "is_reserved" not in df.columns:
-            df["is_reserved"] = 0
-        if "is_disabled" not in df.columns:
-            df["is_disabled"] = 0
-
-        # only count vehicles that are available — not reserved or disabled
-        av = df[(df["is_reserved"] == 0) & (df["is_disabled"] == 0)]
-
-        av_blk   = av.groupby(["census_block", "slot"]).size().reset_index(name="total_available")
-        av["h_slot"] = av["timestamp"].dt.floor(tract_granularity)
-        av_tract = av.groupby(["census_tract", "h_slot"]).size().reset_index(name="total_available")
-
-        if normalize:
-            av_tract["total_available_norm"] = MetricHelper.minmax_normalize(av_tract["total_available"]).round(5)
-
-        if save:
-            av_blk.to_csv(out_dir   / f"availability_block_{output_tag}.csv",         index=False)
-            av_tract.to_csv(out_dir / f"availability_tract_hourly_raw_{output_tag}.csv", index=False)
-
-        return {"block": av_blk, "tract": av_tract}
-
-    @staticmethod
-    def calc_usage(
-        done_df: pd.DataFrame,
-        base_slot: str,
-        aggregate_slot: str,
-        rounding_decimals: int,
-        tract_digits: int,
-        output_tag: str,
-        out_dir: Path,
-        save: bool,
-        normalize: bool,
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Infer vehicle starts and ends by comparing consecutive location snapshots.
-
-        A "start" is when a vehicle disappears from a location (someone picked it up).
-        An "end" is when a vehicle appears at a location (someone dropped it off).
-
-        Parameters
-        ----------
-        done_df           : geocoded vehicle status dataframe
-        base_slot         : fine-grained time bucket e.g. "5min"
-        aggregate_slot    : coarser time bucket for tract rollup e.g. "1h"
-        rounding_decimals : decimal places for lat/lon when detecting position changes
-        tract_digits      : number of characters used to derive tract from block ID
-        output_tag        : system tag used in output filenames
-        out_dir           : output directory path
-        save              : whether to write CSV files
-        normalize         : whether to add normalized columns
-        """
-        df = done_df.copy()
-        df["slot"]  = df["timestamp"].dt.floor(base_slot)
-        df["lat_r"] = df["lat"].round(rounding_decimals)
-        df["lon_r"] = df["lon"].round(rounding_decimals)
-
-        # count vehicles at each rounded location per slot
-        cnts = df.groupby(["census_block", "slot", "lat_r", "lon_r"]).size().reset_index(name="cnt")
-
-        # shift counts forward by one slot to compare consecutive snapshots
-        prev = cnts.copy()
-        prev["slot"] += pd.to_timedelta(base_slot)
-
-        flux = prev.merge(
-            cnts, on=["census_block", "slot", "lat_r", "lon_r"],
-            how="outer", suffixes=("_prev", "_curr")
-        ).fillna(0)
-
-        # vehicles that decreased at a location = starts (picked up)
-        # vehicles that increased at a location = ends (dropped off)
-        flux["starts"] = (flux["cnt_prev"] - flux["cnt_curr"]).clip(lower=0)
-        flux["ends"]   = (flux["cnt_curr"] - flux["cnt_prev"]).clip(lower=0)
-
-        use_blk = flux.groupby(["census_block", "slot"])[["starts", "ends"]].sum().reset_index()
-        use_blk["h_slot"]       = use_blk["slot"].dt.floor(aggregate_slot)
-        use_blk["census_tract"] = use_blk["census_block"].str[:tract_digits]
-
-        use_tract = use_blk.groupby(["census_tract", "h_slot"])[["starts", "ends"]].sum().reset_index()
-
-        if normalize:
-            use_tract["starts_norm"] = MetricHelper.minmax_normalize(use_tract["starts"]).round(5)
-            use_tract["ends_norm"]   = MetricHelper.minmax_normalize(use_tract["ends"]).round(5)
-
-        if save:
-            use_blk.to_csv(out_dir   / f"usage_5min_block_{output_tag}.csv",   index=False)
-            use_tract.to_csv(out_dir / f"usage_hourly_tract_{output_tag}.csv", index=False)
-
-        return {"block": use_blk, "tract": use_tract}
-
-    @staticmethod
-    def calc_idle_time(
-        done_df: pd.DataFrame,
-        vehicle_id_col: str,
-        vehicle_type_col: str,
-        default_vehicle_type: str,
-        hour_bucket_freq: str,
-        tract_digits: int,
-        output_tag: str,
-        out_dir: Path,
-        save: bool,
-        normalize: bool,
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Compute average idle time by counting how many consecutive 5-min snapshots
-        a vehicle stays at the same location without being picked up.
-
-        Each ping represents one 5-minute interval of idleness, so
-        avg_idle_time_minutes = ping_count * 5.
-
-        Parameters
-        ----------
-        done_df              : geocoded vehicle status dataframe
-        vehicle_id_col       : column name for vehicle ID
-        vehicle_type_col     : column name for vehicle type (e-bike, scooter etc.)
-        default_vehicle_type : value to use when vehicle type is missing
-        hour_bucket_freq     : time bucket for hourly rollup e.g. "1h"
-        tract_digits         : number of characters used to derive tract from block ID
-        output_tag           : system tag used in output filenames
-        out_dir              : output directory path
-        save                 : whether to write CSV files
-        normalize            : whether to add a normalized column to tract output
-        """
-        df = done_df.copy()
-
-        # resolve vehicle type column — fall back gracefully if not present
-        if vehicle_type_col not in df.columns:
-            if "vehicle_type" in df.columns:
-                vehicle_type_col = "vehicle_type"
-            else:
-                df[vehicle_type_col] = default_vehicle_type
-
-        df[vehicle_type_col] = df[vehicle_type_col].fillna(default_vehicle_type)
-        df = df.sort_values([vehicle_id_col, "timestamp"]).reset_index(drop=True)
-        df["h_bucket"] = df["timestamp"].dt.floor(hour_bucket_freq)
-
-        # each row = one 5-min snapshot of a vehicle sitting idle at its location
-        idle_res = df.groupby(
-            ["census_block", "h_bucket", vehicle_type_col]
-        ).size().reset_index(name="ping_count")
-
-        idle_res["avg_idle_time_minutes"] = idle_res["ping_count"] * 5
-        idle_res["num_idle_segments"]     = idle_res["ping_count"]
-        idle_res["census_tract"]          = idle_res["census_block"].str[:tract_digits]
-
-        idle_tract = idle_res.groupby(
-            ["census_tract", "h_bucket", vehicle_type_col]
-        )[["avg_idle_time_minutes", "num_idle_segments"]].sum().reset_index()
-
-        if normalize:
-            idle_tract["avg_idle_time_minutes_norm"] = MetricHelper.minmax_normalize(
-                idle_tract["avg_idle_time_minutes"]
-            ).round(5)
-
-        if save:
-            idle_res.to_csv(out_dir   / f"idle_summary_block_{output_tag}.csv",      index=False)
-            idle_tract.to_csv(out_dir / f"idle_summary_tract_{output_tag}.csv",      index=False)
-            idle_tract.to_csv(out_dir / f"idle_summary_tract_norm_{output_tag}.csv", index=False)
-
-        return {"block": idle_res, "tract": idle_tract}
-
-    @staticmethod
-    def calc_safety(
-        done_df: pd.DataFrame,
-        census_blocks_shp: str,
-        centerline_streets_path: str,
-        bike_lanes_path: str,
-        centroid_tract_path: str,
-        safety_working_epsg: int,
-        safety_input_crs: str,
-        safety_centerline_wkt_col: str,
-        safety_bike_lane_wkt_col: str,
-        safety_bike_lane_class_col: Optional[str],
-        safety_protected_values: Optional[List[str]],
-        safety_protected_match_mode: str,
-        planned_bike_lanes_path: Optional[str],
-        tract_digits: int,
-        output_tag: str,
-        out_dir: Path,
-        save: bool,
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Compute bike lane and protected lane ratios per census block and tract.
-
-        Intersects street and bike lane geometries with census blocks to get
-        lengths, then aggregates to tract level and merges with centroid metadata.
-
-        Parameters
-        ----------
-        done_df                     : geocoded vehicle status dataframe
-                                      (used only to scope the service area)
-        census_blocks_shp           : path to census block shapefile
-        centerline_streets_path     : path to street centerline file (.shp or .csv with WKT)
-        bike_lanes_path             : path to bike lane file (.shp, .geojson, or .csv with WKT)
-        centroid_tract_path         : path to tract centroid file (.csv or .shp)
-        safety_working_epsg         : EPSG code for metric CRS used in length calculations
-        safety_input_crs            : CRS string for raw geometry inputs e.g. "EPSG:4326"
-        safety_centerline_wkt_col   : column name for WKT geometry in centerline CSV
-        safety_bike_lane_wkt_col    : column name for WKT geometry in bike lane CSV
-        safety_bike_lane_class_col  : column used to identify protected lanes (or None)
-        safety_protected_values     : values that indicate a protected lane
-        safety_protected_match_mode : "exact" or "contains"
-        planned_bike_lanes_path     : optional path to planned lanes file to include
-        tract_digits                : number of characters used to derive tract from block ID
-        output_tag                  : system tag used in output filenames
-        out_dir                     : output directory path
-        save                        : whether to write CSV files
-        """
-        # load census blocks and reproject to metric CRS for length calculations
-        blocks = gpd.read_file(str(census_blocks_shp))
-        if safety_working_epsg:
-            blocks = blocks.to_crs(epsg=int(safety_working_epsg))
-
-        # load street centerlines — supports both CSV with WKT and shapefiles
-        st_path = Path(centerline_streets_path)
-        if st_path.suffix.lower() == ".csv":
-            st_df = pd.read_csv(st_path)
-            st_df["geometry"] = st_df[safety_centerline_wkt_col].apply(
-                lambda x: wkt.loads(x) if isinstance(x, str) else None
-            )
-            st = gpd.GeoDataFrame(st_df, geometry="geometry", crs=safety_input_crs)
-        else:
-            st = gpd.read_file(st_path).to_crs(safety_input_crs)
-        st = st.to_crs(blocks.crs)
-
-        # load bike lanes — supports CSV with WKT, shapefiles, and GeoJSON
-        bl_path = Path(bike_lanes_path)
-        if bl_path.suffix.lower() == ".csv":
-            bl_df = pd.read_csv(bl_path)
-            bl_df["geometry"] = bl_df[safety_bike_lane_wkt_col].apply(
-                lambda x: wkt.loads(x) if isinstance(x, str) else None
-            )
-            bl = gpd.GeoDataFrame(bl_df, geometry="geometry", crs=safety_input_crs)
-        else:
-            bl = gpd.read_file(bl_path).to_crs(safety_input_crs)
-
-        # optionally append planned bike lanes
-        if planned_bike_lanes_path:
-            pl = gpd.read_file(str(planned_bike_lanes_path)).to_crs(safety_input_crs)
-            bl = pd.concat([bl, pl], ignore_index=True)
-
-        bl = bl.to_crs(blocks.crs)
-
-        # filter to protected lanes based on system-specific configuration
-        prot = bl.iloc[0:0]
-        if safety_bike_lane_class_col and safety_bike_lane_class_col in bl.columns and safety_protected_values:
-            if safety_protected_match_mode == "exact":
-                prot = bl[bl[safety_bike_lane_class_col].isin(safety_protected_values)]
-            else:
-                pattern = "|".join(safety_protected_values)
-                prot = bl[bl[safety_bike_lane_class_col].astype(str).str.contains(pattern, case=False, na=False)]
-
-        def _get_len(lines: gpd.GeoDataFrame, poly: gpd.GeoDataFrame, name: str) -> pd.DataFrame:
-            """Compute total length of lines within each census block polygon."""
-            if lines.empty:
-                return pd.DataFrame({"census_block": [], name: []})
-            clipped = gpd.overlay(lines, poly, how="intersection")
-            clipped["l"] = clipped.geometry.length
-            bid = "GEOID20" if "GEOID20" in poly.columns else "GEOID"
-            return clipped.groupby(bid)["l"].sum().reset_index(name=name).rename(
-                columns={bid: "census_block"}
-            )
-
-        s_len = _get_len(st,   blocks, "st_len")
-        b_len = _get_len(bl,   blocks, "bl_len")
-        p_len = _get_len(prot, blocks, "pr_len")
-
-        safe = s_len.merge(b_len, on="census_block", how="left") \
-                    .merge(p_len, on="census_block", how="left").fillna(0)
-        safe["census_tract"] = safe["census_block"].astype(str).str[:tract_digits]
-
-        # load tract centroid file — supports both CSV and shapefile formats
-        ct_path = Path(centroid_tract_path)
-        ct = pd.read_csv(ct_path) if ct_path.suffix.lower() == ".csv" else gpd.read_file(ct_path)
-
-        cid = next((c for c in ["GEOID", "GEOID20", "TRACTCE", "census_tract"] if c in ct.columns), None)
-
-        if cid:
-            def _clean_id(x: Any) -> str:
-                """Strip trailing .0 from numeric-looking IDs."""
-                s = str(x).strip()
-                return s[:-2] if s.endswith(".0") else s
-
-            base = pd.DataFrame({"census_tract": ct[cid].apply(_clean_id)})
-            safe["census_tract"] = safe["census_tract"].apply(_clean_id)
-
-            # align ID lengths between base and safe — zero-pad the shorter one
-            len_base = base["census_tract"].str.len().mode()[0]
-            len_safe = safe["census_tract"].str.len().mode()[0]
-
-            if len_base < len_safe:
-                base["census_tract"] = base["census_tract"].str.zfill(int(len_safe))
-            elif len_safe < len_base:
-                safe["census_tract"] = safe["census_tract"].str.zfill(int(len_base))
-        else:
-            base = pd.DataFrame({"census_tract": []})
-
-        tract_safe = safe.groupby("census_tract")[["st_len", "bl_len", "pr_len"]].sum().reset_index()
-        final = base.merge(tract_safe, on="census_tract", how="left").fillna(0)
-
-        final["ratio_bl"] = np.where(final["st_len"] > 0, final["bl_len"] / final["st_len"], 0)
-        final["ratio_pr"] = np.where(final["st_len"] > 0, final["pr_len"] / final["st_len"], 0)
-
-        if save:
-            safe.to_csv(out_dir  / f"safety_block_{output_tag}.csv", index=False)
-            final.to_csv(out_dir / f"safety_tract_{output_tag}.csv", index=False)
-
-        return {"block": safe, "tract": final}
+def _clean_tract_id(x: Any) -> str:
+    """
+    Strip trailing '.0' that appears when IDs are stored as floats,
+    and strip surrounding whitespace.
+    """
+    s = str(x).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
 
 
 # ===========================================================================
-# STEP 1 — CONTEXT LOADER
-# Always call this first. It parses the freebike status file, geocodes
-# all vehicle locations to census blocks, and applies the time filter.
-# Pass the returned ctx to whichever compute_*() functions you need.
+# STEP 1 — CONTEXT LOADER (always call this first)
 # ===========================================================================
 
 def load_dockless_context(
@@ -527,73 +206,85 @@ def load_dockless_context(
     freebike_status_txt: Union[str, Path],
     output_dir: Optional[Union[str, Path]] = None,
     time_start: Optional[Union[str, pd.Timestamp]] = None,
-    time_end: Optional[Union[str, pd.Timestamp]] = None,
-    save_outputs: bool = True,
+    time_end:   Optional[Union[str, pd.Timestamp]] = None,
+    # ---- optional asset path overrides (use if paths differ from defaults) ----
+    census_blocks_shp:       Optional[Union[str, Path]] = None,
+    centerline_streets_path: Optional[Union[str, Path]] = None,
+    bike_lanes_path:         Optional[Union[str, Path]] = None,
+    planned_bike_lanes_path: Optional[Union[str, Path]] = None,
+    centroid_tract_path:     Optional[Union[str, Path]] = None,
+    # ---- geocoding settings ----
     fill_missing_with_census_api: bool = True,
     census_benchmark: str = "Public_AR_Census2020",
-    census_vintage: str = "2020",
-    blocks_target_epsg: int = 4326,
-    drop_cols_if_present: Optional[List[str]] = None,
+    census_vintage:   str = "2020",
+    # ---- general settings ----
     tract_digits: int = 11,
+    save_outputs: bool = True,
 ) -> Dict[str, Any]:
     """
-    Parse the freebike status file, geocode vehicle locations to census
-    blocks, and apply the time window filter.
-
-    Always call this first and pass the returned ctx to whichever
-    compute_*() functions you need.
+    Parse the raw GBFS free-bike-status snapshot file, spatially join
+    each ping to a census block, derive the census tract, apply the time
+    window filter, and return a context dictionary used by every downstream
+    compute_* function.
 
     Parameters
     ----------
-    system_key                   : system identifier — see SUPPORTED SYSTEMS above
-    freebike_status_txt          : path to the raw freebike status snapshot file (.txt)
-    output_dir                   : folder where output files will be saved
-    time_start                   : start of the analysis window
-    time_end                     : end of the analysis window
-    save_outputs                 : write the raw and geocoded CSVs to disk
-    fill_missing_with_census_api : use the Census API to fill any vehicle
-                                   locations that could not be geocoded locally
-    census_benchmark             : Census API benchmark string
-    census_vintage               : Census API vintage string
-    blocks_target_epsg           : EPSG code to reproject census blocks to
-    drop_cols_if_present         : list of columns to drop from the raw data
-    tract_digits                 : number of characters used to derive tract
-                                   from block GEOID e.g. 11 for standard tracts
+    system_key           : one of the keys in _SYSTEMS
+    freebike_status_txt  : path to the raw GBFS snapshot text file
+    output_dir           : folder for all outputs (created if absent)
+    time_start / time_end: optional ISO-format strings to filter the data
+    census_blocks_shp    : override the shapefile from the system config
+    fill_missing_with_census_api : call the Census geocoder for pings that
+                           did not fall inside any block polygon
+    tract_digits         : number of leading GEOID digits that form the
+                           tract ID (11 for US census tracts)
+    save_outputs         : write raw and spatially-joined CSVs to disk
 
     Returns
     -------
-    ctx : dict — pass this as the first argument to any compute_*() function
+    ctx : dict — pass this unchanged to every compute_* function
     """
-    if system_key not in SYSTEM_CONFIG:
-        raise ValueError(f"Unknown system_key '{system_key}'. Valid options: {list(SYSTEM_CONFIG.keys())}")
+    if system_key not in _SYSTEMS:
+        raise ValueError(
+            f"Unknown system_key '{system_key}'. "
+            f"Valid options: {list(_SYSTEMS.keys())}"
+        )
 
-    preset     = SYSTEM_CONFIG[system_key]
-    output_tag = preset["tag"]
-    assets     = preset.get("assets", {})
+    preset = _SYSTEMS[system_key]
+    assets = preset.get("assets", {})
+
+    # Resolve asset paths: explicit argument overrides preset default
+    census_blocks_shp       = census_blocks_shp       or assets.get("census_blocks_shp")
+    centerline_streets_path = centerline_streets_path or assets.get("centerline_streets_path")
+    bike_lanes_path         = bike_lanes_path         or assets.get("bike_lanes_path")
+    planned_bike_lanes_path = planned_bike_lanes_path or assets.get("planned_bike_lanes_path")
+    centroid_tract_path     = centroid_tract_path     or assets.get("centroid_tract_path")
 
     out_dir = Path(output_dir or preset["default_output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_path  = out_dir / preset["raw_csv"]
-    done_path = out_dir / preset["done_csv"]
+    tag = preset["tag"]
 
-    if not Path(freebike_status_txt).exists():
-        raise FileNotFoundError(f"Freebike status file not found: {freebike_status_txt}")
-
-    # parse the JSONL-style snapshot file into a flat dataframe
-    print(f"[{system_key}] Parsing freebike status file...")
-    rows = []
-    with Path(freebike_status_txt).open("r", encoding="utf-8") as f:
-        for line in f:
+    # ------------------------------------------------------------------
+    # Step A — Parse the snapshot text file
+    # Each line is a JSON object keyed by timestamp, containing a list
+    # of vehicle records for that snapshot.
+    # ------------------------------------------------------------------
+    print(f"[{system_key}] Parsing snapshot file: {freebike_status_txt}")
+    rows: List[Dict] = []
+    with Path(freebike_status_txt).open("r", encoding="utf-8") as fh:
+        for line in fh:
             if not line.strip():
                 continue
             try:
                 blob = json.loads(line)
-                ts   = list(blob.keys())[0]
+                ts = list(blob.keys())[0]
                 for entry in blob[ts]:
+                    # Flatten nested vehicle_types_available into columns
                     if "vehicle_types_available" in entry:
                         for vt in entry.get("vehicle_types_available", []):
-                            entry[f"vehicle_type_{vt.get('vehicle_type_id', 'unknown')}_count"] = vt.get("count", 0)
+                            col = f"vehicle_type_{vt.get('vehicle_type_id', 'unknown')}_count"
+                            entry[col] = vt.get("count", 0)
                         del entry["vehicle_types_available"]
                     entry["timestamp"] = ts
                     rows.append(entry)
@@ -602,138 +293,313 @@ def load_dockless_context(
 
     raw_df = pd.DataFrame(rows)
     if raw_df.empty:
-        raise ValueError("No data found in the freebike status file.")
+        raise ValueError("No data found in the snapshot file.")
 
-    # detect vehicle ID column — naming varies across vendors
-    vehicle_id_col = next((c for c in ["bike_id", "vehicle_id", "id"] if c in raw_df.columns), None)
-    if not vehicle_id_col:
-        raise ValueError("Could not find vehicle ID column. Checked: bike_id, vehicle_id, id")
+    # Detect the vehicle ID column (varies by vendor)
+    vehicle_id_col = next(
+        (c for c in ["bike_id", "vehicle_id", "id"] if c in raw_df.columns), None
+    )
+    if vehicle_id_col is None:
+        raise ValueError(
+            "Could not find a vehicle ID column. "
+            "Expected one of: bike_id, vehicle_id, id."
+        )
 
-    # parse timestamps — try standard format first, fall back to unix seconds
+    # Parse timestamps — try ISO format first, fall back to Unix epoch
     raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], errors="coerce")
     if raw_df["timestamp"].isna().mean() > 0.5:
-        raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], unit="s", errors="coerce")
-
-    if drop_cols_if_present:
-        drop_now = [c for c in drop_cols_if_present if c in raw_df.columns]
-        if drop_now:
-            raw_df = raw_df.drop(columns=drop_now)
+        raw_df["timestamp"] = pd.to_datetime(
+            raw_df["timestamp"], unit="s", errors="coerce"
+        )
 
     if save_outputs:
-        raw_df.to_csv(raw_path, index=False)
+        raw_df.to_csv(out_dir / preset["raw_csv"], index=False)
 
+    # ------------------------------------------------------------------
+    # Step B — Spatial join: ping coordinates → census block
+    # ------------------------------------------------------------------
     if not {"lat", "lon"}.issubset(raw_df.columns):
-        raise ValueError("Input data is missing lat and/or lon columns.")
+        raise ValueError("Snapshot data is missing lat/lon columns.")
 
-    # geocode vehicle locations to census blocks via spatial join
-    print(f"[{system_key}] Geocoding vehicle locations to census blocks...")
+    print(f"[{system_key}] Spatially joining pings to census blocks...")
     latlon = raw_df[["lat", "lon"]].drop_duplicates()
-    gdf    = gpd.GeoDataFrame(
+    gdf = gpd.GeoDataFrame(
         latlon,
-        geometry=[Point(xy) for xy in zip(latlon.lon, latlon.lat)],
+        geometry=[Point(lon, lat) for lat, lon in zip(latlon["lat"], latlon["lon"])],
         crs="EPSG:4326",
     )
-    blocks = gpd.read_file(str(assets["census_blocks_shp"])).to_crs(epsg=blocks_target_epsg)
-    b_col  = "GEOID20" if "GEOID20" in blocks.columns else "GEOID"
 
+    blocks = gpd.read_file(str(census_blocks_shp)).to_crs(epsg=4326)
+    b_col = "GEOID20" if "GEOID20" in blocks.columns else "GEOID"
     joined = gpd.sjoin(gdf, blocks[[b_col, "geometry"]], how="left", predicate="within")
     joined = joined.rename(columns={b_col: "census_block"})
 
-    done_df = raw_df.merge(joined[["lat", "lon", "census_block"]], on=["lat", "lon"], how="left")
+    done_df = raw_df.merge(
+        joined[["lat", "lon", "census_block"]], on=["lat", "lon"], how="left"
+    )
 
-    # fill any remaining missing blocks using the Census Geocoder API
+    # ------------------------------------------------------------------
+    # Step C — Fill missing block assignments via Census geocoder API
+    # ------------------------------------------------------------------
     if fill_missing_with_census_api:
-        missing = done_df[done_df["census_block"].isna()][["lat", "lon"]].drop_duplicates()
-        if not missing.empty and len(missing) < 1000:
-            tqdm.pandas(desc="API Geocoding Fallback")
+        missing = (
+            done_df[done_df["census_block"].isna()][["lat", "lon"]]
+            .drop_duplicates()
+        )
+        if not missing.empty and len(missing) < 1_000:
+            tqdm.pandas(desc="Census API geocode")
 
-            def _fetch_block(r: pd.Series) -> Optional[str]:
+            def _geocode(row):
                 try:
                     url = (
-                        f"https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
-                        f"?x={r.lon}&y={r.lat}&benchmark={census_benchmark}"
-                        f"&vintage={census_vintage}&format=json"
+                        f"https://geocoding.geo.census.gov/geocoder/geographies/"
+                        f"coordinates?x={row.lon}&y={row.lat}"
+                        f"&benchmark={census_benchmark}&vintage={census_vintage}&format=json"
                     )
                     res = requests.get(url, timeout=5).json()
                     return res["result"]["geographies"]["2020 Census Blocks"][0]["GEOID"]
                 except Exception:
                     return None
 
-            missing["cb_new"] = missing.progress_apply(_fetch_block, axis=1)
+            missing["cb_new"] = missing.progress_apply(_geocode, axis=1)
             done_df = done_df.merge(missing, on=["lat", "lon"], how="left")
             done_df["census_block"] = done_df["census_block"].fillna(done_df["cb_new"])
             done_df.drop(columns=["cb_new"], inplace=True, errors="ignore")
 
     done_df["census_block"] = done_df["census_block"].fillna("unknown").astype(str)
+    # Derive census tract from the first N digits of the census block GEOID
     done_df["census_tract"] = done_df["census_block"].str[:tract_digits]
 
-    # apply the time window filter
+    # ------------------------------------------------------------------
+    # Step D — Apply time window filter
+    # ------------------------------------------------------------------
     if time_start:
         done_df = done_df[done_df["timestamp"] >= pd.to_datetime(time_start)]
     if time_end:
         done_df = done_df[done_df["timestamp"] < pd.to_datetime(time_end)]
 
     if save_outputs:
-        done_df.to_csv(done_path, index=False)
+        done_df.to_csv(out_dir / preset["done_csv"], index=False)
 
+    print(
+        f"[{system_key}] Context ready. "
+        f"Rows: {len(done_df):,}  |  "
+        f"Tracts: {done_df['census_tract'].nunique()}"
+    )
+
+    # ------------------------------------------------------------------
+    # Assemble context dictionary
+    # All downstream compute_* functions read from this dict.
+    # ------------------------------------------------------------------
     return {
-        "system_key":    system_key,
-        "preset":        preset,
-        "output_tag":    output_tag,
-        "assets":        assets,
-        "out_dir":       out_dir,
-        "done_df":       done_df,
-        "vehicle_id_col": vehicle_id_col,
-        "tract_digits":  tract_digits,
-        "save_outputs":  save_outputs,
+        "system_key":            system_key,
+        "done_df":               done_df,
+        "vehicle_id_col":        vehicle_id_col,
+        "out_dir":               out_dir,
+        "tag":                   tag,
+        "save_outputs":          save_outputs,
+        "tract_digits":          tract_digits,
+        # Asset paths needed by compute_safety
+        "centerline_streets_path":  centerline_streets_path,
+        "bike_lanes_path":          bike_lanes_path,
+        "planned_bike_lanes_path":  planned_bike_lanes_path,
+        "centroid_tract_path":      centroid_tract_path,
+        "census_blocks_shp":        census_blocks_shp,
+        # Full preset for per-system config values
+        "_preset": preset,
     }
 
 
 # ===========================================================================
-# STEP 2 — METRIC FUNCTIONS
-# Call whichever ones you need. Each one takes ctx as the first argument.
-# No result passing between functions — every function is self-contained.
+# STEP 2a — AVAILABILITY
 # ===========================================================================
 
 def compute_availability(
     ctx: Dict[str, Any],
     *,
-    block_granularity: str = "5min",
-    tract_granularity: str = "1h",
+    block_time_granularity: str = "5min",
+    tract_time_granularity: str = "1h",
+    reserved_col: str = "is_reserved",
+    disabled_col: str = "is_disabled",
     normalize: bool = True,
-    save_outputs: Optional[bool] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Compute available (non-reserved, non-disabled) vehicles per block and tract.
+    Count non-reserved, non-disabled vehicles per census tract per hour.
+
+    The raw pings are first bucketed at block level (5-min default) to
+    reduce noise, then aggregated to tract × hour.
 
     Parameters
     ----------
-    ctx               : returned by load_dockless_context()
-    block_granularity : time bucket for block-level output e.g. "5min"
-    tract_granularity : time bucket for tract-level output e.g. "1h"
-    normalize         : add a normalized column to the tract output
-    save_outputs      : write result CSVs (default: inherits from context)
+    ctx                    : context from load_dockless_context
+    block_time_granularity : time-floor for block-level aggregation
+    tract_time_granularity : time-floor for tract-level aggregation
+    reserved_col           : column indicating reserved vehicles (0/1)
+    disabled_col           : column indicating disabled vehicles (0/1)
+    normalize              : add a min-max normalised column
 
     Returns
     -------
-    dict with keys:
-        block : available vehicle counts per block per time slot
-        tract : available vehicle counts per tract per hour
+    dict with keys "block" and "tract" — both pd.DataFrames
     """
-    save = save_outputs if save_outputs is not None else ctx["save_outputs"]
+    done_df  = ctx["done_df"].copy()
+    out_dir  = ctx["out_dir"]
+    tag      = ctx["tag"]
+    save     = ctx["save_outputs"]
 
-    print(f"[{ctx['system_key']}] Computing availability...")
+    # Add missing flag columns if the vendor doesn't provide them
+    for col in [reserved_col, disabled_col]:
+        if col not in done_df.columns:
+            done_df[col] = 0
 
-    return MetricHelper.calc_availability(
-        done_df=ctx["done_df"],
-        block_granularity=block_granularity,
-        tract_granularity=tract_granularity,
-        output_tag=ctx["output_tag"],
-        out_dir=ctx["out_dir"],
-        save=save,
-        normalize=normalize,
+    done_df["slot"] = done_df["timestamp"].dt.floor(block_time_granularity)
+
+    # Keep only vehicles that are available (not reserved, not disabled)
+    av = done_df[
+        (done_df[reserved_col] == 0) & (done_df[disabled_col] == 0)
+    ]
+
+    # Block-level count (5-min buckets)
+    av_block = (
+        av.groupby(["census_block", "slot"])
+        .size()
+        .reset_index(name="total_available")
     )
 
+    # Tract-level count (hourly buckets)
+    av["h_slot"] = av["timestamp"].dt.floor(tract_time_granularity)
+    av_tract = (
+        av.groupby(["census_tract", "h_slot"])
+        .size()
+        .reset_index(name="total_available")
+    )
+    av_tract = av_tract.rename(columns={"h_slot": "time_slot"})
+
+    if normalize:
+        av_tract["total_available_norm"] = _minmax(av_tract["total_available"]).round(5)
+
+    if save:
+        av_block.to_csv(out_dir / f"availability_block_{tag}.csv",         index=False)
+        av_tract.to_csv(out_dir / f"availability_norm_hourly_tract_{tag}.csv", index=False)
+
+    print(f"  [availability] Done. Tract rows: {len(av_tract):,}")
+    return {"block": av_block, "tract": av_tract}
+
+
+# ===========================================================================
+# STEP 2b — CAPACITY
+# ===========================================================================
+
+def compute_capacity(
+    ctx: Dict[str, Any],
+    *,
+    reserved_col: str = "is_reserved",
+    disabled_col: str = "is_disabled",
+    normalize: bool = True,
+) -> pd.DataFrame:
+    """
+    Estimate vehicle capacity per census tract for a dockless system.
+
+    Method (identical to the docked-system approach):
+        1. For every 5-minute snapshot, sum the number of non-reserved,
+           non-disabled vehicles across all tracts to get the system-wide
+           total at that moment.
+        2. Identify the snapshot with the highest system-wide total —
+           this is the "peak availability" moment and serves as the
+           capacity baseline (the moment when the most bikes were visible
+           in the GBFS feed, i.e. the closest proxy to the fleet size).
+        3. Use each tract's vehicle count at that single snapshot as its
+           capacity value.
+        4. Apply min-max normalisation.
+
+    This is the same logic used in the Seattle Bird notebook:
+        peak_time_slot = availability_by_time.idxmax()
+        vehicle_capacity = peak_df.groupby('census_tract')['total_available'].sum()
+
+    Parameters
+    ----------
+    ctx          : context from load_dockless_context
+    reserved_col : column indicating reserved vehicles (0/1)
+    disabled_col : column indicating disabled vehicles (0/1)
+    normalize    : add a min-max normalised column
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        census_tract, vehicle_capacity[, vehicle_capacity_norm]
+    """
+    done_df = ctx["done_df"].copy()
+    out_dir = ctx["out_dir"]
+    tag     = ctx["tag"]
+    save    = ctx["save_outputs"]
+
+    # Add missing flag columns if the vendor doesn't provide them
+    for col in [reserved_col, disabled_col]:
+        if col not in done_df.columns:
+            done_df[col] = 0
+
+    # Only count available (not reserved, not disabled) vehicles
+    av = done_df[
+        (done_df[reserved_col] == 0) & (done_df[disabled_col] == 0)
+    ].copy()
+
+    # Bucket timestamps to 5-minute slots for consistent snapshot windows
+    av["slot"] = av["timestamp"].dt.floor("5min")
+
+    # ----------------------------------------------------------------
+    # Step 1: Find the snapshot (time slot) where system-wide availability
+    #         is the highest — this is the peak fleet availability moment.
+    # ----------------------------------------------------------------
+    system_wide = (
+        av.groupby("slot")["census_tract"]
+        .count()          # total available pings at each 5-min slot
+        .reset_index(name="total_system")
+    )
+
+    if system_wide.empty:
+        print("  [capacity] WARNING: no available vehicle data found.")
+        return pd.DataFrame(columns=["census_tract", "vehicle_capacity"])
+
+    peak_slot = system_wide.loc[
+        system_wide["total_system"].idxmax(), "slot"
+    ]
+    print(
+        f"  [capacity] Peak availability slot: {peak_slot}  "
+        f"(system total: {system_wide['total_system'].max():,} pings)"
+    )
+
+    # ----------------------------------------------------------------
+    # Step 2: At the peak snapshot, count vehicles per census tract.
+    #         This gives each tract's capacity.
+    # ----------------------------------------------------------------
+    peak_df = av[av["slot"] == peak_slot]
+
+    cap = (
+        peak_df.groupby("census_tract")
+        .size()
+        .reset_index(name="vehicle_capacity")
+    )
+
+    # ----------------------------------------------------------------
+    # Step 3: Min-max normalise capacity across all tracts
+    # ----------------------------------------------------------------
+    if normalize:
+        cap["vehicle_capacity_norm"] = _minmax(cap["vehicle_capacity"]).round(5)
+
+    if save:
+        cap.to_csv(out_dir / f"capacity_tract_{tag}.csv", index=False)
+
+    print(
+        f"  [capacity] Done. "
+        f"Tracts with capacity: {len(cap):,}  |  "
+        f"Max capacity: {cap['vehicle_capacity'].max()}"
+    )
+    return cap
+
+
+# ===========================================================================
+# STEP 2c — USAGE
+# ===========================================================================
 
 def compute_usage(
     ctx: Dict[str, Any],
@@ -742,192 +608,398 @@ def compute_usage(
     aggregate_time_slot: str = "1h",
     rounding_decimals: int = 4,
     normalize: bool = True,
-    save_outputs: Optional[bool] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Compute vehicle starts and ends per census block and tract.
+    Infer trip starts and ends from consecutive location snapshots.
 
-    Vehicle starts and ends are inferred by comparing consecutive
-    location snapshots — no separate trip data file is needed.
+    Because dockless systems do not provide explicit trip records, usage
+    is estimated by tracking whether a vehicle was present at a location
+    in one 5-minute window but absent (or in a different location) in the
+    next — a disappearance is a trip start, a reappearance is a trip end.
 
     Parameters
     ----------
-    ctx                  : returned by load_dockless_context()
-    base_time_slot       : fine-grained time bucket for detection e.g. "5min"
-    aggregate_time_slot  : coarser bucket for tract rollup e.g. "1h"
-    rounding_decimals    : decimal places for lat/lon position comparison
-    normalize            : add normalized columns to tract output
-    save_outputs         : write result CSVs (default: inherits from context)
+    ctx                  : context from load_dockless_context
+    base_time_slot       : time-floor for detecting location changes (5min)
+    aggregate_time_slot  : time-floor for tract-level hourly aggregation
+    rounding_decimals    : coordinate rounding for location matching
+    normalize            : add min-max normalised starts/ends columns
 
     Returns
     -------
-    dict with keys:
-        block : starts and ends per block per 5-min slot
-        tract : starts and ends per tract per hour
+    dict with keys "block" and "tract" — both pd.DataFrames
     """
-    save = save_outputs if save_outputs is not None else ctx["save_outputs"]
+    done_df = ctx["done_df"].copy()
+    out_dir = ctx["out_dir"]
+    tag     = ctx["tag"]
+    save    = ctx["save_outputs"]
 
-    print(f"[{ctx['system_key']}] Computing usage...")
+    done_df["slot"] = done_df["timestamp"].dt.floor(base_time_slot)
+    done_df["lat_r"] = done_df["lat"].round(rounding_decimals)
+    done_df["lon_r"] = done_df["lon"].round(rounding_decimals)
 
-    return MetricHelper.calc_usage(
-        done_df=ctx["done_df"],
-        base_slot=base_time_slot,
-        aggregate_slot=aggregate_time_slot,
-        rounding_decimals=rounding_decimals,
-        tract_digits=ctx["tract_digits"],
-        output_tag=ctx["output_tag"],
-        out_dir=ctx["out_dir"],
-        save=save,
-        normalize=normalize,
+    # Count vehicles at each (block, slot, rounded location)
+    cnts = (
+        done_df
+        .groupby(["census_block", "slot", "lat_r", "lon_r"])
+        .size()
+        .reset_index(name="cnt")
     )
 
+    # Shift one slot forward to create "previous" counts
+    prev = cnts.copy()
+    prev["slot"] += pd.to_timedelta(base_time_slot)
+
+    # Merge current and previous counts to detect changes
+    flux = prev.merge(
+        cnts,
+        on=["census_block", "slot", "lat_r", "lon_r"],
+        how="outer",
+        suffixes=("_prev", "_curr"),
+    ).fillna(0)
+
+    # Decrease in count = bikes left (trip starts)
+    # Increase in count = bikes arrived (trip ends)
+    flux["starts"] = (flux["cnt_prev"] - flux["cnt_curr"]).clip(lower=0)
+    flux["ends"]   = (flux["cnt_curr"] - flux["cnt_prev"]).clip(lower=0)
+
+    use_block = (
+        flux.groupby(["census_block", "slot"])[["starts", "ends"]]
+        .sum()
+        .reset_index()
+    )
+
+    # Aggregate to tract × hour
+    use_block["h_slot"]      = use_block["slot"].dt.floor(aggregate_time_slot)
+    use_block["census_tract"] = use_block["census_block"].str[:ctx["tract_digits"]]
+    use_tract = (
+        use_block.groupby(["census_tract", "h_slot"])[["starts", "ends"]]
+        .sum()
+        .reset_index()
+        .rename(columns={"h_slot": "time_slot"})
+    )
+
+    if normalize:
+        use_tract["trips_starting_norm"] = _minmax(use_tract["starts"]).round(5)
+        use_tract["trips_ending_norm"]   = _minmax(use_tract["ends"]).round(5)
+
+    if save:
+        use_block.to_csv(out_dir / f"usage_5min_block_{tag}.csv",       index=False)
+        use_tract.to_csv(out_dir / f"usage_norm_hourly_tract_{tag}.csv", index=False)
+
+    print(f"  [usage] Done. Tract rows: {len(use_tract):,}")
+    return {"block": use_block, "tract": use_tract}
+
+
+# ===========================================================================
+# STEP 2d — IDLE TIME
+# ===========================================================================
 
 def compute_idle_time(
     ctx: Dict[str, Any],
     *,
+    hour_bucket_freq: str = "1h",
+    rounding_decimals: int = 4,
     vehicle_type_col: str = "vehicle_type_id",
     default_vehicle_type: str = "",
-    hour_bucket_freq: str = "1h",
     normalize: bool = True,
-    save_outputs: Optional[bool] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
-    Compute average idle time per census block and tract.
+    Estimate idle time per vehicle per tract per hour.
 
-    Idle time is measured by counting how many consecutive 5-minute
-    snapshots a vehicle remains at the same location without being
-    picked up. Each snapshot = 5 minutes of idle time.
+    Method: count how many 5-minute pings a vehicle produces within a
+    given hour in the same census block.  Each ping represents 5 minutes
+    of the vehicle being stationary (idle), so:
+
+        avg_idle_time_minutes = ping_count × 5
 
     Parameters
     ----------
-    ctx                  : returned by load_dockless_context()
-    vehicle_type_col     : column name for vehicle type (e-bike, scooter etc.)
-    default_vehicle_type : value to use when vehicle type is missing
-    hour_bucket_freq     : time bucket for hourly rollup e.g. "1h"
-    normalize            : add a normalized column to the tract output
-    save_outputs         : write result CSVs (default: inherits from context)
+    ctx                  : context from load_dockless_context
+    hour_bucket_freq     : time-floor for hourly aggregation
+    rounding_decimals    : kept for API consistency (unused in this method)
+    vehicle_type_col     : column holding vehicle type (e-bike, scooter…)
+    default_vehicle_type : fallback if the column is absent or null
+    normalize            : add a min-max normalised idle-time column
 
     Returns
     -------
-    dict with keys:
-        block : idle time per block per hour per vehicle type
-        tract : idle time per tract per hour per vehicle type (normalized)
+    dict with keys "block" and "tract" — both pd.DataFrames
     """
-    save = save_outputs if save_outputs is not None else ctx["save_outputs"]
+    done_df = ctx["done_df"].copy()
+    out_dir = ctx["out_dir"]
+    tag     = ctx["tag"]
+    save    = ctx["save_outputs"]
+    vid_col = ctx["vehicle_id_col"]
 
-    print(f"[{ctx['system_key']}] Computing idle time...")
+    # Fall back gracefully if the vehicle-type column is missing
+    if vehicle_type_col not in done_df.columns:
+        if "vehicle_type" in done_df.columns:
+            vehicle_type_col = "vehicle_type"
+        else:
+            done_df[vehicle_type_col] = default_vehicle_type
 
-    return MetricHelper.calc_idle_time(
-        done_df=ctx["done_df"],
-        vehicle_id_col=ctx["vehicle_id_col"],
-        vehicle_type_col=vehicle_type_col,
-        default_vehicle_type=default_vehicle_type,
-        hour_bucket_freq=hour_bucket_freq,
-        tract_digits=ctx["tract_digits"],
-        output_tag=ctx["output_tag"],
-        out_dir=ctx["out_dir"],
-        save=save,
-        normalize=normalize,
+    done_df[vehicle_type_col] = done_df[vehicle_type_col].fillna(default_vehicle_type)
+    done_df = done_df.sort_values([vid_col, "timestamp"]).reset_index(drop=True)
+    done_df["h_bucket"] = done_df["timestamp"].dt.floor(hour_bucket_freq)
+
+    # Count pings per (block, hour, vehicle type) — each ping = 5 min idle
+    idle_block = (
+        done_df
+        .groupby(["census_block", "h_bucket", vehicle_type_col])
+        .size()
+        .reset_index(name="ping_count")
+    )
+    idle_block["avg_idle_time_minutes"] = idle_block["ping_count"] * 5
+    idle_block["num_idle_segments"]     = idle_block["ping_count"]
+    idle_block["census_tract"]          = idle_block["census_block"].str[:ctx["tract_digits"]]
+
+    # Aggregate to tract level
+    idle_tract = (
+        idle_block
+        .groupby(["census_tract", "h_bucket", vehicle_type_col])[
+            ["avg_idle_time_minutes", "num_idle_segments"]
+        ]
+        .sum()
+        .reset_index()
+        .rename(columns={"h_bucket": "time_slot"})
     )
 
+    if normalize:
+        idle_tract["avg_idle_time_norm"] = _minmax(
+            idle_tract["avg_idle_time_minutes"]
+        ).round(5)
+
+    if save:
+        idle_block.to_csv(out_dir / f"idle_summary_block_{tag}.csv",      index=False)
+        idle_tract.to_csv(out_dir / f"idle_norm_hourly_tract_{tag}.csv",  index=False)
+
+    print(f"  [idle_time] Done. Tract rows: {len(idle_tract):,}")
+    return {"block": idle_block, "tract": idle_tract}
+
+
+# ===========================================================================
+# STEP 2e — SAFETY
+# ===========================================================================
 
 def compute_safety(
     ctx: Dict[str, Any],
     *,
-    safety_centerline_wkt_col: str = "line",
-    safety_bike_lane_wkt_col: str = "shape",
-    safety_input_crs: str = "EPSG:4326",
-    save_outputs: Optional[bool] = None,
-) -> Dict[str, pd.DataFrame]:
+    input_crs: str = "EPSG:4326",
+    centerline_wkt_col: str = "line",
+    bike_lane_wkt_col:  str = "shape",
+    normalize: bool = True,
+) -> pd.DataFrame:
     """
-    Compute bike lane and protected lane ratios per census block and tract.
+    Compute the bike-lane ratio (bike-lane length / total street length)
+    per census tract as a proxy for cycling safety.
 
-    All geometry paths and protected lane classification rules are read
-    from the system configuration — no extra arguments needed for most users.
+    The ratio is calculated at block level then aggregated to tract level.
+    A separate "protected ratio" is computed for protected bike lanes
+    (class varies by city — see _SYSTEMS safety_config).
 
     Parameters
     ----------
-    ctx                       : returned by load_dockless_context()
-    safety_centerline_wkt_col : column name for WKT geometry in centerline CSV
-    safety_bike_lane_wkt_col  : column name for WKT geometry in bike lane CSV
-    safety_input_crs          : CRS of the raw geometry inputs
-    save_outputs              : write result CSVs (default: inherits from context)
+    ctx                : context from load_dockless_context
+    input_crs          : CRS of the street / bike-lane source files
+    centerline_wkt_col : WKT geometry column name in Centerline CSVs
+    bike_lane_wkt_col  : WKT geometry column name in bike-lane CSVs
+    normalize          : add normalised ratio columns
 
     Returns
     -------
-    dict with keys:
-        block : bike lane ratios at census block level
-        tract : bike lane ratios at census tract level
+    pd.DataFrame with one row per census tract
     """
-    save   = save_outputs if save_outputs is not None else ctx["save_outputs"]
-    preset = ctx["preset"]
-    assets = ctx["assets"]
+    out_dir = ctx["out_dir"]
+    tag     = ctx["tag"]
+    save    = ctx["save_outputs"]
+    preset  = ctx["_preset"]
+    tract_d = ctx["tract_digits"]
 
-    # read safety classification rules from system config
-    safe_conf = preset.get("safety_config", {})
+    # Resolve per-system safety parameters
+    safety_epsg = preset.get("safety_epsg", 26910)
+    s_conf      = preset.get("safety_config", {})
+    bl_class_col       = s_conf.get("bike_lane_class_col")
+    protected_values   = s_conf.get("protected_values", [])
+    protected_match    = s_conf.get("protected_match_mode", "contains")
 
-    print(f"[{ctx['system_key']}] Computing safety...")
+    # ------------------------------------------------------------------
+    # Load census blocks in the correct projected CRS for length measurement
+    # ------------------------------------------------------------------
+    blocks = gpd.read_file(str(ctx["census_blocks_shp"])).to_crs(epsg=safety_epsg)
+    b_col  = "GEOID20" if "GEOID20" in blocks.columns else "GEOID"
 
-    return MetricHelper.calc_safety(
-        done_df=ctx["done_df"],
-        census_blocks_shp=assets["census_blocks_shp"],
-        centerline_streets_path=assets["centerline_streets_path"],
-        bike_lanes_path=assets["bike_lanes_path"],
-        centroid_tract_path=assets["centroid_tract_path"],
-        safety_working_epsg=preset.get("safety_epsg", 26910),
-        safety_input_crs=safety_input_crs,
-        safety_centerline_wkt_col=safety_centerline_wkt_col,
-        safety_bike_lane_wkt_col=safety_bike_lane_wkt_col,
-        safety_bike_lane_class_col=safe_conf.get("bike_lane_class_col"),
-        safety_protected_values=safe_conf.get("protected_values"),
-        safety_protected_match_mode=safe_conf.get("protected_match_mode", "contains"),
-        planned_bike_lanes_path=assets.get("planned_bike_lanes_path"),
-        tract_digits=ctx["tract_digits"],
-        output_tag=ctx["output_tag"],
-        out_dir=ctx["out_dir"],
-        save=save,
+    # ------------------------------------------------------------------
+    # Load street centrelines
+    # ------------------------------------------------------------------
+    st_path = Path(ctx["centerline_streets_path"])
+    if st_path.suffix.lower() == ".csv":
+        st_df = pd.read_csv(st_path)
+        st_df["geometry"] = st_df[centerline_wkt_col].apply(
+            lambda x: wkt.loads(x) if isinstance(x, str) else None
+        )
+        streets = gpd.GeoDataFrame(st_df, geometry="geometry", crs=input_crs)
+    else:
+        streets = gpd.read_file(st_path).to_crs(input_crs)
+    streets = streets.to_crs(blocks.crs)
+
+    # ------------------------------------------------------------------
+    # Load bike lanes (and optionally planned bike lanes)
+    # ------------------------------------------------------------------
+    bl_path = Path(ctx["bike_lanes_path"])
+    if bl_path.suffix.lower() == ".csv":
+        bl_df = pd.read_csv(bl_path)
+        bl_df["geometry"] = bl_df[bike_lane_wkt_col].apply(
+            lambda x: wkt.loads(x) if isinstance(x, str) else None
+        )
+        bike_lanes = gpd.GeoDataFrame(bl_df, geometry="geometry", crs=input_crs)
+    else:
+        bike_lanes = gpd.read_file(bl_path).to_crs(input_crs)
+
+    if ctx["planned_bike_lanes_path"]:
+        planned = gpd.read_file(str(ctx["planned_bike_lanes_path"])).to_crs(input_crs)
+        bike_lanes = pd.concat([bike_lanes, planned], ignore_index=True)
+
+    bike_lanes = bike_lanes.to_crs(blocks.crs)
+
+    # Filter to protected lanes if the system config specifies a class column
+    if bl_class_col and bl_class_col in bike_lanes.columns and protected_values:
+        protected = bike_lanes[bike_lanes[bl_class_col].isin(protected_values)]
+    else:
+        protected = bike_lanes.iloc[0:0]   # empty — no protected-lane distinction
+
+    # ------------------------------------------------------------------
+    # Compute intersected lengths per census block
+    # ------------------------------------------------------------------
+    def _lengths(lines: gpd.GeoDataFrame, polys: gpd.GeoDataFrame, col_name: str) -> pd.DataFrame:
+        if lines.empty:
+            return pd.DataFrame({"census_block": [], col_name: []})
+        clipped = gpd.overlay(lines, polys, how="intersection")
+        clipped["_len"] = clipped.geometry.length
+        return (
+            clipped.groupby(b_col)["_len"]
+            .sum()
+            .reset_index(name=col_name)
+            .rename(columns={b_col: "census_block"})
+        )
+
+    st_len   = _lengths(streets,   blocks, "st_len")
+    bl_len   = _lengths(bike_lanes, blocks, "bl_len")
+    prot_len = _lengths(protected,  blocks, "pr_len")
+
+    safe = (
+        st_len
+        .merge(bl_len,   on="census_block", how="left")
+        .merge(prot_len, on="census_block", how="left")
+        .fillna(0)
     )
+    safe["census_tract"] = safe["census_block"].astype(str).str[:tract_d]
+
+    # ------------------------------------------------------------------
+    # Load centroid file to define the full tract universe
+    # ------------------------------------------------------------------
+    ct_path = Path(ctx["centroid_tract_path"])
+    ct = (
+        gpd.read_file(ct_path)
+        if ct_path.suffix.lower() != ".csv"
+        else pd.read_csv(ct_path)
+    )
+    cid = _get_centroid_id_col(ct)
+
+    if cid:
+        base = pd.DataFrame({"census_tract": ct[cid]})
+        base["census_tract"] = base["census_tract"].apply(_clean_tract_id)
+        safe["census_tract"] = safe["census_tract"].apply(_clean_tract_id)
+
+        # Align ID lengths (pad with leading zeros if needed)
+        len_base = base["census_tract"].str.len().mode()[0]
+        len_safe = safe["census_tract"].str.len().mode()[0]
+        if len_base < len_safe:
+            base["census_tract"] = base["census_tract"].str.zfill(int(len_safe))
+        elif len_safe < len_base:
+            safe["census_tract"] = safe["census_tract"].str.zfill(int(len_base))
+    else:
+        base = pd.DataFrame({"census_tract": []})
+
+    # Aggregate to tract and merge against the full tract universe
+    tract_safe = (
+        safe.groupby("census_tract")[["st_len", "bl_len", "pr_len"]]
+        .sum()
+        .reset_index()
+    )
+    final = base.merge(tract_safe, on="census_tract", how="left").fillna(0)
+
+    final["bike_lane_ratio"]           = np.where(
+        final["st_len"] > 0, final["bl_len"] / final["st_len"], 0
+    )
+    final["protected_bike_lane_ratio"] = np.where(
+        final["st_len"] > 0, final["pr_len"] / final["st_len"], 0
+    )
+
+    if normalize:
+        final["bike_lane_ratio_norm"]           = _minmax(final["bike_lane_ratio"]).round(5)
+        final["protected_bike_lane_ratio_norm"] = _minmax(
+            final["protected_bike_lane_ratio"]
+        ).round(5)
+
+    if save:
+        safe.to_csv( out_dir / f"safety_block_{tag}.csv",  index=False)
+        final.to_csv(out_dir / f"safety_tract_{tag}.csv",  index=False)
+
+    print(f"  [safety] Done. Tracts: {len(final):,}")
+    return final
 
 
 # ===========================================================================
-# CONVENIENCE FUNCTION — runs all metrics in one call
+# CONVENIENCE — compute all metrics in one call
 # ===========================================================================
 
 def compute_all(
     ctx: Dict[str, Any],
     *,
-    save_outputs: Optional[bool] = None,
+    normalize: bool = True,
 ) -> Dict[str, Any]:
     """
-    Run all four metrics in one call.
+    Run all five metrics in the recommended order and return every result.
 
-    This is a convenience wrapper that calls compute_availability(),
-    compute_usage(), compute_idle_time(), and compute_safety() and
-    returns all results together.
+    Order:
+        1. availability
+        2. capacity     (uses the same availability data, no extra input)
+        3. usage
+        4. idle_time
+        5. safety
 
     Parameters
     ----------
-    ctx          : returned by load_dockless_context()
-    save_outputs : write all result CSVs (default: inherits from context)
+    ctx       : context from load_dockless_context
+    normalize : passed through to every individual compute function
 
     Returns
     -------
-    dict with keys: availability, usage, idle_time, safety
+    dict with keys:
+        availability  — {"block": df, "tract": df}
+        capacity      — pd.DataFrame
+        usage         — {"block": df, "tract": df}
+        idle_time     — {"block": df, "tract": df}
+        safety        — pd.DataFrame
     """
-    avail = compute_availability(ctx, save_outputs=save_outputs)
-    usage = compute_usage(ctx,        save_outputs=save_outputs)
-    idle  = compute_idle_time(ctx,    save_outputs=save_outputs)
-    safe  = compute_safety(ctx,       save_outputs=save_outputs)
+    print(f"\n[{ctx['system_key']}] Running compute_all...")
 
-    print(f"--- Done. Outputs saved to {ctx['out_dir']} ---")
+    avail  = compute_availability(ctx, normalize=normalize)
+    cap    = compute_capacity(ctx, normalize=normalize)
+    usage  = compute_usage(ctx, normalize=normalize)
+    idle   = compute_idle_time(ctx, normalize=normalize)
+    safety = compute_safety(ctx, normalize=normalize)
 
+    print(f"[{ctx['system_key']}] All metrics complete. Outputs in: {ctx['out_dir']}")
     return {
         "availability": avail,
+        "capacity":     cap,
         "usage":        usage,
         "idle_time":    idle,
-        "safety":       safe,
+        "safety":       safety,
     }
 
 
 if __name__ == "__main__":
-    print("dockless_wrapper module loaded successfully")
+    print("dockless_wrapper module loaded successfully.")
