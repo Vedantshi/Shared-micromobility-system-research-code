@@ -170,6 +170,62 @@ def _rank_pct(s: pd.Series) -> pd.Series:
     """
     return _to_numeric(s).rank(pct=True, method="average")
 
+# Keyword profiles for auto-resolving value columns per metric.
+# Each entry: (must_contain_keywords, must_not_contain_keywords)
+# The engine scores every column in the CSV and picks the best match
+# when the default column name is not found.
+_COL_PROFILES = {
+    "availability": (["available", "norm"],    ["dock", "bike", "ebike", "station"]),
+    "usage":        (["start",    "norm"],     ["end", "time", "station"]),
+    "idle_time":    (["idle",     "norm"],     ["segment", "count", "ping"]),
+}
+
+
+def _resolve_col(
+    df: pd.DataFrame,
+    metric: str,
+    requested_col: str,
+    csv_label: str,
+) -> str:
+    """
+    Return the best value column for a given metric CSV.
+
+    If the requested column exists it is returned unchanged.
+    Otherwise every column in the DataFrame is scored against
+    metric-specific keyword profiles and the best match is returned.
+
+    This makes the scatter plot work automatically for both docked
+    and dockless CSVs without the user needing to specify column names:
+
+        Docked:   total_vehicle_available_norm / trips_starting_norm / avg_idle_time_norm
+        Dockless: total_available_norm         / starts_norm         / avg_idle_time_minutes_norm
+    """
+    cols = list(df.columns)
+
+    if requested_col in cols:
+        return requested_col
+
+    must, must_not = _COL_PROFILES.get(metric, (["norm"], []))
+
+    scored = []
+    for c in cols:
+        cl = c.lower()
+        if any(kw in cl for kw in must_not):
+            continue
+        score = sum(1 for kw in must if kw in cl)
+        if score > 0:
+            scored.append((score, c))
+
+    if scored:
+        chosen = max(scored)[1]
+        print(f"   -> '{csv_label}': column '{requested_col}' not found. "
+              f"Auto-selected '{chosen}'.")
+        return chosen
+
+    raise KeyError(
+        f"Could not find a suitable column for metric '{metric}' in {csv_label}. "
+        f"Requested '{requested_col}'. Available columns: {cols}"
+    )
 
 def _pct_to_quantile(p: float) -> float:
     """
@@ -638,7 +694,7 @@ def plot_scatter(
     print(f"Loading CSVs and aggregating to tract level (agg_method='{agg_method_l}')...")
 
     # ------------------------------------------------------------------
-    # Step 1 — Load CSVs and validate required columns
+    # Step 1 — Load CSVs and auto-resolve value columns
     # ------------------------------------------------------------------
     avail_df = pd.read_csv(availability_csv)
     usage_df  = pd.read_csv(usage_csv)
@@ -652,22 +708,15 @@ def plot_scatter(
                 f"Available columns: {list(df.columns)}"
             )
 
-    # Check that the value columns exist
-    if availability_col not in avail_df.columns:
-        raise KeyError(
-            f"availability_csv is missing column '{availability_col}'. "
-            f"Available: {list(avail_df.columns)}"
-        )
-    if usage_col not in usage_df.columns:
-        raise KeyError(
-            f"usage_csv is missing column '{usage_col}'. "
-            f"Available: {list(usage_df.columns)}"
-        )
-    if idle_col not in idle_df.columns:
-        raise KeyError(
-            f"idle_csv is missing column '{idle_col}'. "
-            f"Available: {list(idle_df.columns)}"
-        )
+    # Auto-resolve value columns — if the default column name is not
+    # present in the CSV the engine picks the best semantic match.
+    # This handles both docked and dockless CSVs automatically:
+    #   availability: total_vehicle_available_norm → total_available_norm
+    #   usage:        trips_starting_norm          → starts_norm
+    #   idle_time:    avg_idle_time_norm            → avg_idle_time_minutes_norm
+    availability_col = _resolve_col(avail_df, "availability", availability_col, "availability_csv")
+    usage_col        = _resolve_col(usage_df,  "usage",        usage_col,        "usage_csv")
+    idle_col         = _resolve_col(idle_df,   "idle_time",    idle_col,         "idle_csv")
 
     # ------------------------------------------------------------------
     # Step 2 — Normalise tract IDs to consistent 11-digit strings

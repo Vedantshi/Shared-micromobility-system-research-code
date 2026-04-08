@@ -91,10 +91,12 @@ _CATEGORY_COLORS = {
     4: "#D6604D",   # Low X  + Low Y   (dark orange/red)
 }
 
-# NYC borough GEOID prefixes — tracts outside these are excluded
+# NYC borough GEOID prefixes — tracts outside these are excluded for NYC data
 _NYC_BOROUGH_PREFIXES = ("36061", "36047", "36081", "36005")
 
 # Per-metric defaults: (default value column, short display label)
+# These are the docked column names. If not found in the CSV the engine
+# auto-selects the best matching column using keyword scoring.
 _METRIC_CONFIG = {
     "availability": ("total_vehicle_available_norm", "Availability"),
     "usage":        ("trips_starting_norm",          "Usage"),
@@ -102,10 +104,29 @@ _METRIC_CONFIG = {
     "safety":       ("bike_lane_ratio_norm",          "Safety"),
 }
 
+# Keyword profiles for auto-resolving value columns per metric.
+# Each entry: metric → (must_contain_keywords, must_not_contain_keywords)
+# The engine scores every column in the CSV and picks the best match.
+_VALUE_COL_PROFILES = {
+    "availability": (["available", "norm"],   ["dock", "bike", "ebike", "station"]),
+    "usage":        (["start",    "norm"],    ["end", "time", "station"]),
+    "idle_time":    (["idle",     "norm"],    ["segment", "count", "ping"]),
+    "safety":       (["bike", "lane", "norm"],["protect"]),
+}
+
+# Keywords for auto-resolving the station count column in capacity CSVs.
+# Docked: num_station  |  Dockless: vehicle_capacity
+_COUNT_KEYWORDS  = ["num_station", "station", "vehicle_capacity", "total_capacity"]
+_COUNT_EXCLUDES  = ["norm", "dock", "occupancy", "pressure", "rate"]
+
+# Keywords for auto-resolving the gate (normalised capacity) column.
+# Docked: total_capacity_norm  |  Dockless: vehicle_capacity_norm
+_GATE_KEYWORDS   = ["capacity_norm", "vehicle_capacity_norm", "total_capacity_norm"]
+_GATE_EXCLUDES   = ["dock", "occupancy", "pressure", "rate", "num_station"]
+
 
 # ===========================================================================
 # INTERNAL HELPERS
-# All shared logic lives here. Not meant to be called by the user directly.
 # ===========================================================================
 
 def _to_geoid11(s: pd.Series) -> pd.Series:
@@ -116,6 +137,95 @@ def _to_geoid11(s: pd.Series) -> pd.Series:
         .str.replace(r"\.0$", "", regex=True)
         .str.replace(r"\s+", "", regex=True)
         .str.zfill(11)
+    )
+
+
+def _score_column(col: str, must_contain: list, must_not: list) -> int:
+    """
+    Score a column name against keyword lists.
+    Returns the count of must_contain keywords found, or 0 if any
+    must_not keyword is present. Higher score = better match.
+    """
+    cl = col.lower()
+    if any(kw in cl for kw in must_not):
+        return 0
+    return sum(1 for kw in must_contain if kw in cl)
+
+
+def _resolve_capacity_cols(
+    cap_df: pd.DataFrame,
+    requested_count_col: str,
+    requested_gate_col: str,
+) -> tuple:
+    """
+    Return the best (station_count_col, gate_col) pair for this capacity CSV.
+
+    If the requested columns exist they are returned unchanged.
+    Otherwise every column is scored using keyword profiles so the
+    function works automatically for both docked and dockless CSVs,
+    and for any future system whose columns are descriptively named.
+
+    Docked:   num_station / total_capacity_norm
+    Dockless: vehicle_capacity / vehicle_capacity_norm
+    """
+    cols = list(cap_df.columns)
+
+    def _best(keywords, excludes, requested):
+        if requested in cols:
+            return requested
+        scored = [
+            (sum(1 for kw in keywords if kw in c.lower()), c)
+            for c in cols
+            if not any(ex in c.lower() for ex in excludes)
+            and sum(1 for kw in keywords if kw in c.lower()) > 0
+        ]
+        return max(scored)[1] if scored else None
+
+    return (
+        _best(_COUNT_KEYWORDS, _COUNT_EXCLUDES, requested_count_col),
+        _best(_GATE_KEYWORDS,  _GATE_EXCLUDES,  requested_gate_col),
+    )
+
+
+def _resolve_value_col(
+    df: pd.DataFrame,
+    metric: str,
+    requested_col: str,
+) -> str:
+    """
+    Return the best normalised value column for a given metric.
+
+    If the requested column exists it is returned unchanged. Otherwise
+    every column is scored using metric-specific keyword profiles so the
+    function works automatically for both docked and dockless CSVs.
+
+    Docked vs dockless differences resolved here:
+        availability : total_vehicle_available_norm → total_available_norm
+        usage        : trips_starting_norm          → starts_norm
+        idle_time    : avg_idle_time_norm            → avg_idle_time_minutes_norm
+        safety       : bike_lane_ratio_norm          (same in both)
+    """
+    cols = list(df.columns)
+
+    if requested_col in cols:
+        return requested_col
+
+    must, must_not = _VALUE_COL_PROFILES.get(metric, (["norm"], []))
+    scored = [
+        (_score_column(c, must, must_not), c)
+        for c in cols
+        if _score_column(c, must, must_not) > 0
+    ]
+
+    if scored:
+        chosen = max(scored)[1]
+        print(f"   -> value_col '{requested_col}' not found. "
+              f"Auto-selected '{chosen}' for metric '{metric}'.")
+        return chosen
+
+    raise KeyError(
+        f"Could not find a suitable value column for metric '{metric}'. "
+        f"Requested '{requested_col}'. Available columns: {cols}"
     )
 
 
@@ -132,37 +242,58 @@ def _build_tract_universe(
     """
     Build the filtered GeoDataFrame that every map uses as its base.
 
-    Steps:
-        1. Load capacity CSV and find tracts with enough stations
-        2. Load tract shapefile and filter to NYC boroughs
-        3. Keep only tracts that exist in the capacity universe
-        4. Apply gate column filter (drop tracts with zero capacity)
+    Works for both docked and dockless capacity CSVs — column names
+    for station count and gate are resolved automatically if the
+    defaults are not present in the file.
 
-    Returns a GeoDataFrame in EPSG:3857 ready for mapping.
+    Steps:
+        1. Load capacity CSV and auto-resolve column names
+        2. Build tract universe (all tracts with enough capacity)
+        3. Load shapefile and apply city-aware borough filter
+        4. Merge capacity onto geometry and apply gate filter
     """
     cap_raw = pd.read_csv(capacity_csv)
-    for col in [tract_col, station_count_col, gate_col]:
-        if col not in cap_raw.columns:
-            raise KeyError(
-                f"capacity_csv is missing column '{col}'. "
-                f"Available columns: {list(cap_raw.columns)}"
-            )
 
-    cap_raw[tract_col] = _to_geoid11(cap_raw[tract_col])
-    cap = cap_raw.groupby(tract_col, as_index=False).agg(
-        {station_count_col: "sum", gate_col: "mean"}
+    if tract_col not in cap_raw.columns:
+        raise KeyError(
+            f"capacity_csv is missing tract column '{tract_col}'. "
+            f"Available columns: {list(cap_raw.columns)}"
+        )
+
+    # Auto-resolve station count and gate columns for this CSV
+    count_col, gate_col = _resolve_capacity_cols(
+        cap_raw, station_count_col, gate_col
     )
 
-    tract_universe = cap.loc[
-        cap[station_count_col].fillna(0) >= min_stations, tract_col
-    ].unique()
+    cap_raw[tract_col] = _to_geoid11(cap_raw[tract_col])
+
+    # Aggregate capacity to one row per tract
+    agg_dict = {}
+    if count_col:
+        agg_dict[count_col] = "sum"
+    if gate_col:
+        agg_dict[gate_col] = "mean"
+    cap = (
+        cap_raw.groupby(tract_col, as_index=False).agg(agg_dict)
+        if agg_dict
+        else cap_raw.groupby(tract_col, as_index=False).mean(numeric_only=True)
+    )
+
+    # Build tract universe — for dockless (no station count col) include all
+    if count_col and count_col in cap.columns:
+        tract_universe = cap.loc[
+            cap[count_col].fillna(0) >= min_stations, tract_col
+        ].unique()
+    else:
+        tract_universe = cap[tract_col].unique()
 
     if len(tract_universe) == 0:
         raise ValueError(
-            f"No tracts found with {station_count_col} >= {min_stations}. "
-            f"Check your capacity_csv or lower min_stations."
+            "No tracts found after capacity filtering. "
+            "Check your capacity_csv or lower min_stations."
         )
 
+    # Load shapefile
     tracts = gpd.read_file(tract_shp)
     if shp_geoid_col not in tracts.columns:
         raise KeyError(
@@ -171,19 +302,31 @@ def _build_tract_universe(
         )
 
     tracts[shp_geoid_col] = _to_geoid11(tracts[shp_geoid_col])
-    tracts_nyc = tracts[tracts[shp_geoid_col].str.startswith(_NYC_BOROUGH_PREFIXES)].copy()
-    tracts_nyc = tracts_nyc[tracts_nyc[shp_geoid_col].isin(tract_universe)].copy()
 
-    if tracts_nyc.empty:
+    # Apply NYC borough filter only when the shapefile actually contains
+    # NYC tracts — for all other cities the filter is skipped entirely
+    has_nyc = tracts[shp_geoid_col].str.startswith(_NYC_BOROUGH_PREFIXES).any()
+    if has_nyc:
+        tracts = tracts[
+            tracts[shp_geoid_col].str.startswith(_NYC_BOROUGH_PREFIXES)
+        ].copy()
+
+    tracts = tracts[tracts[shp_geoid_col].isin(tract_universe)].copy()
+
+    if tracts.empty:
         raise ValueError(
-            "No tracts remain after NYC borough and capacity filtering. "
+            "No tracts remain after capacity filtering. "
             "Check that GEOID formats match between the shapefile and capacity_csv."
         )
 
-    gdf = tracts_nyc.merge(cap, left_on=shp_geoid_col, right_on=tract_col, how="left")
-    gdf = gdf.dropna(subset=[gate_col]).copy()
-    if drop_zeros:
-        gdf = gdf[gdf[gate_col] > 0].copy()
+    # Merge capacity onto geometry
+    gdf = tracts.merge(cap, left_on=shp_geoid_col, right_on=tract_col, how="left")
+
+    # Apply gate filter only when we have a resolved gate column
+    if gate_col and gate_col in gdf.columns:
+        gdf = gdf.dropna(subset=[gate_col]).copy()
+        if drop_zeros:
+            gdf = gdf[gdf[gate_col] > 0].copy()
 
     if gdf.empty:
         raise ValueError(
@@ -199,24 +342,28 @@ def _aggregate_metric(
     tract_col: str,
     time_col: str,
     agg: str,
-) -> tuple[pd.DataFrame, str]:
+    metric: str = "",
+) -> tuple:
     """
     Load a metric CSV and reduce it to one value per tract.
-
-    Returns the aggregated DataFrame and the name of the aggregated column.
+    Value column is auto-resolved using keyword scoring if the
+    default is not present in the CSV.
+    Returns (aggregated_df, aggregated_column_name).
     """
     df = pd.read_csv(csv)
 
-    for col in [tract_col, value_col]:
-        if col not in df.columns:
-            raise KeyError(
-                f"CSV is missing column '{col}'. "
-                f"Available columns: {list(df.columns)}"
-            )
+    if tract_col not in df.columns:
+        raise KeyError(
+            f"CSV is missing tract column '{tract_col}'. "
+            f"Available columns: {list(df.columns)}"
+        )
 
     valid_aggs = {"mean", "median", "sum", "max", "min"}
     if agg not in valid_aggs:
         raise ValueError(f"agg must be one of: {sorted(valid_aggs)}")
+
+    # Auto-resolve the value column using keyword scoring
+    value_col = _resolve_value_col(df, metric, value_col)
 
     if time_col in df.columns:
         df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
@@ -523,8 +670,8 @@ def plot_correlation(
     )
 
     # aggregate each metric CSV to one value per tract
-    x_agg, x_col = _aggregate_metric(csv_x, value_col_x, tract_col, time_col, agg)
-    y_agg, y_col = _aggregate_metric(csv_y, value_col_y, tract_col, time_col, agg)
+    x_agg, x_col = _aggregate_metric(csv_x, value_col_x, tract_col, time_col, agg, metric=metric_x)
+    y_agg, y_col = _aggregate_metric(csv_y, value_col_y, tract_col, time_col, agg, metric=metric_y)
 
     # merge both metrics onto the geometry
     gdf = base_gdf.merge(x_agg, left_on=shp_geoid_col, right_on=tract_col, how="left")
