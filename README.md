@@ -142,7 +142,10 @@ docs/
 
 All spatial assets required by the package — census block shapefiles, census tract shapefiles, street centerlines, and bike lane files — are pre-configured and stored in the `assets/` folder. The package resolves all asset paths automatically using the city or system key you pass. **You never need to specify shapefile paths manually.**
 
-The `assets/` folder is organized by city and must sit in the **same directory** as `mobility_package/`:
+**Download the complete assets folder from Google Drive:**
+[https://drive.google.com/drive/folders/1IS62D1pRkhFCvSD-NFnG4Ij0TMUSNN4G?usp=sharing](https://drive.google.com/drive/folders/1IS62D1pRkhFCvSD-NFnG4Ij0TMUSNN4G?usp=sharing)
+
+After downloading, place the `assets/` folder in the **same directory** as `mobility_package/` so your structure looks like this:
 
 ```
 your_project/
@@ -180,8 +183,7 @@ your_project/
 │           └── Planned_Bike_Facilities.shp (+ .dbf .prj .shx)
 └── example_notebooks/
 ```
-
-When you clone or download the repository, the `assets/` folder is included at the correct location. No path configuration is needed on any machine.
+Once the folder is in place, the package finds all files automatically. No path configuration is needed on any machine.
 
 ---
 
