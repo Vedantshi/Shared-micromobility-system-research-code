@@ -31,21 +31,21 @@ All visualizations below were produced by running the package on one day of Pitt
 **Bike Lane Safety Rank by Census Tract**
 Choropleth map showing the distribution of bike lane safety scores across Pittsburgh census tracts, binned into deciles using the RdYlBu colormap.
 
-![Safety Choropleth Map](docs/images/safety_map.png)
+![Safety Choropleth Map](Mobility_Package_Code/Pitt_Outputs/safety_rank__mean.png)
 
 ---
 
 **Availability × Safety Correlation Map**
 Four-quadrant correlation map comparing vehicle availability and bike lane safety per census tract. Each tract is classified as High/High, High/Low, Low/High, or Low/Low relative to the median threshold.
 
-![Correlation Map](docs/images/correlation_map.png)
+![Correlation Map](Mobility_Package_Code/Pitt_Outputs/correlation_availability_vs_safety__mean__quantile.png)
 
 ---
 
 **Supply vs Demand Scatter Plot**
 Two-panel scatter plot classifying every census tract by its availability (supply) and usage (demand). Undersupplied tracts (low availability, high demand) are shown in red.
 
-![Scatter Plot](docs/images/scatter_plot.png)
+![Scatter Plot](Mobility_Package_Code/Pitt_Outputs/scatter_supply_demand.png)
 
 ---
 
