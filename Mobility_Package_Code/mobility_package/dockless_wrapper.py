@@ -80,80 +80,106 @@ from tqdm import tqdm
 # need to know which city they are running against.
 # ===========================================================================
 
+# ===========================================================================
+# ASSET ROOT
+# All spatial assets live under a single `assets/` folder that sits in the
+# same directory as the package. Users download the assets folder, place it
+# next to mobility_package/, and no other path configuration is needed.
+# ===========================================================================
+
+_ASSET_ROOT = Path(__file__).parent.parent / "assets"
+
+
+def _asset(*parts: str) -> str:
+    """Return the absolute path to an asset file relative to the asset root."""
+    return str(_ASSET_ROOT.joinpath(*parts))
+
+
+# ===========================================================================
+# SYSTEM CONFIGURATION TABLE
+# All city-specific asset paths and processing parameters live here.
+# To add a new system: add a new entry following the same structure, then
+# place the required files in assets/<CITY_FOLDER>/.
+# ===========================================================================
+
 _SYSTEMS: Dict[str, Dict[str, Any]] = {
+
     "SF_LIME_DOCKLESS": {
-        "city": "San Francisco",
-        "vendor": "Lime",
-        "tag": "sf_lime",
-        "default_output_dir": "SF_LIME_DOCKLESS_FULL_RUN",
-        "raw_csv":  "san_fran_lime_status_raw.csv",
-        "done_csv": "san_fran_lime_status_done.csv",
+        "city":                "San Francisco",
+        "vendor":              "Lime",
+        "tag":                 "sf_lime",
+        "default_output_dir":  "SF_LIME_DOCKLESS_FULL_RUN",
+        "raw_csv":             "san_fran_lime_status_raw.csv",
+        "done_csv":            "san_fran_lime_status_done.csv",
         "assets": {
-            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
-            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
-            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
-            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
+            "census_blocks_shp":       _asset("SF", "tl_2024_06_tabblock20.shp"),
+            "centerline_streets_path": _asset("SF", "Centerline.csv"),
+            "bike_lanes_path":         _asset("SF", "Bikelane.csv"),
+            "centroid_tract_path":     _asset("SF", "centroid_tract_ca.csv"),
         },
-        "safety_epsg": 26910,
+        "safety_epsg":   26910,
         "idle_decimals": 4,
     },
+
     "SF_SPIN_DOCKLESS": {
-        "city": "San Francisco",
-        "vendor": "Spin",
-        "tag": "sf_spin",
-        "default_output_dir": "SF_SPIN_DOCKLESS_FULL_RUN",
-        "raw_csv":  "san_fran_spin_status_raw.csv",
-        "done_csv": "san_fran_spin_status_done.csv",
+        "city":                "San Francisco",
+        "vendor":              "Spin",
+        "tag":                 "sf_spin",
+        "default_output_dir":  "SF_SPIN_DOCKLESS_FULL_RUN",
+        "raw_csv":             "san_fran_spin_status_raw.csv",
+        "done_csv":            "san_fran_spin_status_done.csv",
         "assets": {
-            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\San_Fran_Lime\tl_2024_06_tabblock20.shp",
-            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Centerline.csv",
-            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Lime\Bikelane.csv",
-            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\centroid_tract_ca.csv",
+            "census_blocks_shp":       _asset("SF", "tl_2024_06_tabblock20.shp"),
+            "centerline_streets_path": _asset("SF", "Centerline.csv"),
+            "bike_lanes_path":         _asset("SF", "Bikelane.csv"),
+            "centroid_tract_path":     _asset("SF", "centroid_tract_ca.csv"),
         },
-        "safety_epsg": 26910,
+        "safety_epsg":   26910,
         "idle_decimals": 4,
     },
+
     "SEATTLE_BIRD_DOCKLESS": {
-        "city": "Seattle",
-        "vendor": "Bird",
-        "tag": "seattle_bird",
-        "default_output_dir": "SEATTLE_BIRD_DOCKLESS_FULL_RUN",
-        "raw_csv":  "seattle_bird_status_raw.csv",
-        "done_csv": "seattle_bird_status_done.csv",
+        "city":                "Seattle",
+        "vendor":              "Bird",
+        "tag":                 "seattle_bird",
+        "default_output_dir":  "SEATTLE_BIRD_DOCKLESS_FULL_RUN",
+        "raw_csv":             "seattle_bird_status_raw.csv",
+        "done_csv":            "seattle_bird_status_done.csv",
         "assets": {
-            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle Census Block\tl_2024_53_tabblock20.shp",
-            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle_Streets.shp",
-            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\SDOT_Bike_Facilities_5512142703833213564.geojson",
-            "planned_bike_lanes_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Planned Seattle Bike Lanes\Planned_Bike_Facilities.shp",
-            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Avalibility\Seattle_Bird\tl_2024_53_tract.shp",
+            "census_blocks_shp":       _asset("SEATTLE", "tl_2024_53_tabblock20.shp"),
+            "centerline_streets_path": _asset("SEATTLE", "Seattle_Streets.shp"),
+            "bike_lanes_path": _asset("SEATTLE", "SDOT_Bike_Facilities_5512142703833213564.geojson"),
+            "planned_bike_lanes_path": _asset("SEATTLE", "Planned_Bike_Facilities.shp"),
+            "centroid_tract_path":     _asset("SEATTLE", "tl_2024_53_tract.shp"),
         },
-        "safety_epsg": 2285,
+        "safety_epsg":   2285,
         "safety_config": {
-            "bike_lane_class_col":   "CATEGORY",
-            "protected_values":      ["BKF-PBL"],
-            "protected_match_mode":  "exact",
+            "bike_lane_class_col":  "CATEGORY",
+            "protected_values":     ["BKF-PBL"],
+            "protected_match_mode": "exact",
         },
         "idle_decimals": 3,
     },
+
     "SEATTLE_LIME_DOCKLESS": {
-        "city": "Seattle",
-        "vendor": "Lime",
-        "tag": "seattle_lime",
-        "default_output_dir": "SEATTLE_LIME_DOCKLESS_FULL_RUN",
-        "raw_csv":  "seattle_lime_status_raw.csv",
-        "done_csv": "seattle_lime_status_done.csv",
+        "city":                "Seattle",
+        "vendor":              "Lime",
+        "tag":                 "seattle_lime",
+        "default_output_dir":  "SEATTLE_LIME_DOCKLESS_FULL_RUN",
+        "raw_csv":             "seattle_lime_status_raw.csv",
+        "done_csv":            "seattle_lime_status_done.csv",
         "assets": {
-            "census_blocks_shp":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle Census Block\tl_2024_53_tabblock20.shp",
-            "centerline_streets_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Seattle_Streets.shp",
-            "bike_lanes_path":          r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\SDOT_Bike_Facilities_5512142703833213564.geojson",
-            "planned_bike_lanes_path":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Seattle_Bird\Planned Seattle Bike Lanes\Planned_Bike_Facilities.shp",
-            "centroid_tract_path":      r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Avalibility\Seattle_Bird\tl_2024_53_tract.shp",
+            "census_blocks_shp":       _asset("SEATTLE", "tl_2024_53_tabblock20.shp"),
+            "centerline_streets_path": _asset("SEATTLE", "Seattle_Streets.shp"),
+            "bike_lanes_path":         _asset("SEATTLE", "SDOT_Bike_Facilities_5512142703833213564.geojson"),
+            "planned_bike_lanes_path": _asset("SEATTLE", "Planned_Bike_Facilities.shp"),
+            "centroid_tract_path":     _asset("SEATTLE", "tl_2024_53_tract.shp"),
         },
-        "safety_epsg": 2285,
+        "safety_epsg":   2285,
         "safety_config": {
-            "bike_lane_class_col":   "CATEGORY",
-            "protected_values":      ["BKF-PBL"],
-            "protected_match_mode":  "exact",
+            "bike_lane_class_col":  "CATEGORY",
+            "protected_values":     ["BKF-PBL"],
+            "protected_match_mode": "exact",
         },
         "idle_decimals": 4,
     },

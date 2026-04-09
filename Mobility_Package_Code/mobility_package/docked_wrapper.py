@@ -71,14 +71,37 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # City configuration
 # ---------------------------------------------------------------------------
 
+# ===========================================================================
+# ASSET ROOT
+# All spatial assets live under a single `assets/` folder that sits in the
+# same directory as the package. Users download the assets folder, place it
+# next to mobility_package/, and no other path configuration is needed.
+# ===========================================================================
+
+_ASSET_ROOT = Path(__file__).parent.parent / "assets"
+
+
+def _asset(*parts: str) -> str:
+    """Return the absolute path to an asset file relative to the asset root."""
+    return str(_ASSET_ROOT.joinpath(*parts))
+
+
+# ===========================================================================
+# CITY CONFIGURATION
+# All city-specific parameters and asset paths live here.
+# To add a new city: add a new entry following the same structure, then
+# place the required files in assets/<CITY_KEY>/.
+# ===========================================================================
+
 CITY_CONFIG: Dict[str, Dict[str, Any]] = {
+
     "SF": {
         "use_api_fallback": True,
         "assets": {
-            "census_blocks": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Usage\San_Fran_Baywheels\tl_2024_06_tabblock20.shp",
-            "tracts":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\San_Fran_Baywheels\tl_2024_06_tract.shp",
-            "centerline":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Baywheels\Streets___Active_and_Retired_20250626 (1).csv",
-            "bike_lanes":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\San_Fran_Baywheels\Bikelane.csv",
+            "census_blocks": _asset("SF", "tl_2024_06_tabblock20.shp"),
+            "tracts":        _asset("SF", "tl_2024_06_tract.shp"),
+            "centerline":    _asset("SF", "Centerline.csv"),
+            "bike_lanes":    _asset("SF", "Bikelane.csv"),
         },
         "geo": {
             "blocks_id":             "GEOID20",
@@ -100,11 +123,11 @@ CITY_CONFIG: Dict[str, Dict[str, Any]] = {
     "NJ": {
         "use_api_fallback": False,
         "assets": {
-            "census_blocks": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\NJ\tl_2024_34_tabblock20.shp",
-            "tracts":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\NJ\tl_2024_34_tract.shp",
-            "centroid_csv":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\NJ\centroid_tract_nj.csv",
-            "centerline":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\NJ\Tran_road.shp",
-            "bike_lanes":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\NJ\bike-lanes-2020-division-of-transportation.shp",
+            "census_blocks": _asset("NJ", "tl_2024_34_tabblock20.shp"),
+            "tracts":        _asset("NJ", "tl_2024_34_tract.shp"),
+            "centroid_csv":  _asset("NJ", "centroid_tract_nj.csv"),
+            "centerline":    _asset("NJ", "Tran_road.shp"),
+            "bike_lanes": _asset("NJ", "bike-lanes-2020-division-of-transportation.shp"),
         },
         "geo": {
             "blocks_id":             "GEOID20",
@@ -126,11 +149,11 @@ CITY_CONFIG: Dict[str, Dict[str, Any]] = {
     "NYC": {
         "use_api_fallback": True,
         "assets": {
-            "census_blocks": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\GBFS_Census_Tract\NYC\tl_2024_36_tabblock20.shp",
-            "tracts":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\NYC\tl_2024_36_tract.shp",
-            "centroid_csv":  r"D:\Research Fellowship\Capacity_NYC\centroid_tract_computed.csv",
-            "centerline":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\NYC\CSCL_PlowNYC_20250619.csv",
-            "bike_lanes":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\NYC\New_York_City_Bike_Routes_20250619.csv",
+            "census_blocks": _asset("NYC", "tl_2024_36_tabblock20.shp"),
+            "tracts":        _asset("NYC", "tl_2024_36_tract.shp"),
+            "centroid_csv":  _asset("NYC", "centroid_tract_nyc.csv"),
+            "centerline": _asset("NYC", "CSCL_PlowNYC_20250619.csv"),
+            "bike_lanes": _asset("NYC", "New_York_City_Bike_Routes_20250619.csv"),
         },
         "geo": {
             "blocks_id":             "GEOID20",
@@ -152,11 +175,11 @@ CITY_CONFIG: Dict[str, Dict[str, Any]] = {
     "PITT": {
         "use_api_fallback": True,
         "assets": {
-            "census_blocks": r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Pitt\tl_2024_42_tabblock20.shp",
-            "tracts":        r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\Pitt\tl_2024_42_tract.shp",
-            "centroid_csv":  r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Capacity\Pitt\centroid_tract_pa.csv",
-            "centerline":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Pitt\Pittsburgh_Street_Centerline.shp",
-            "bike_lanes":    r"D:\Research Fellowship\Summer Research Stuff\Clean_Utilities\Safety\Pitt\Bike Map\Bike Lanes.shp",
+            "census_blocks": _asset("PITT", "tl_2024_42_tabblock20.shp"),
+            "tracts":        _asset("PITT", "tl_2024_42_tract.shp"),
+            "centroid_csv":  _asset("PITT", "centroid_tract_pa.csv"),
+            "centerline":    _asset("PITT", "Pittsburgh_Street_Centerline.shp"),
+            "bike_lanes":    _asset("PITT", "Bike Lanes.shp"),
         },
         "geo": {
             "blocks_id":             "GEOID20",
