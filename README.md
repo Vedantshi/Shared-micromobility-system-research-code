@@ -611,9 +611,9 @@ F = Σ log(x_i + 1)   for all tracts i
 
 ## Research Context
 
-> Zibandehkhooy, T., & Chen, V. (X.). (2025).
+> Zibandehkhooy, T., & Chen, V. (X.). (2026).
 > *Evaluating Multidimensional Fairness in Shared Micromobility: Case Studies of Docked and Dockless Systems.*
-> Preprint submitted to Journal of Transport Geography.
+> Case Studies on Transport Policy.
 
 ---
 
@@ -624,9 +624,9 @@ F = Σ log(x_i + 1)   for all tracts i
   title   = {Evaluating Multidimensional Fairness in Shared Micromobility:
              Case Studies of Docked and Dockless Systems},
   author  = {Zibandehkhooy, Tara and Chen, Violet (Xinying)},
-  journal = {Journal of Transport Geography},
-  year    = {2025},
-  note    = {Preprint}
+  journal = {Case Studies on Transport Policy},
+  year    = {2026},
+  note    = {Volume 24}
 }
 ```
 
@@ -634,7 +634,7 @@ F = Σ log(x_i + 1)   for all tracts i
 
 ## Authors
 
-**Research Paper:** Tara Zibandehkhooy, Violet (Xinying) Chen — *Journal of Transport Geography, 2025 (Preprint)*
+**Research Paper:** Tara Zibandehkhooy, Violet (Xinying) Chen — *Case Studies on Transport Policy, 2026*
 
 **Package Implementation:** All module design, code architecture, and pipeline engineering independently authored to support the paper's empirical analysis.
 
