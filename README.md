@@ -16,7 +16,7 @@ This package provides a structured Python implementation for computing, analyzin
 
 > **Evaluating Multidimensional Fairness in Shared Micromobility: Case Studies of Docked and Dockless Systems**
 > *Tara Zibandehkhooy, Violet (Xinying) Chen*
-> Preprint submitted to Journal of Transport Geography, September 2025
+> Case Studies on Transport Policy, June 2026
 
 The framework operationalizes a pipeline that moves from raw GBFS (General Bikeshare Feed Specification) snapshots through utility computation, fairness measurement, and spatial visualization. It supports both docked systems (e.g. Citi Bike NYC) and dockless systems (e.g. Lime, Bird, Spin in San Francisco and Seattle), and is designed to be extensible to other cities and system types.
 
